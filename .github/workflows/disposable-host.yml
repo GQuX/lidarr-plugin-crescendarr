@@ -56,7 +56,11 @@ jobs:
           CI: "true"
         run: |
           set -euo pipefail
-          python3 tools/experiments/run_disposable_lidarr.py \
-            "${{ steps.runtime.outputs.bin }}" \
-            "${RUNNER_TEMP}/crescendarr-compiled-probe/Lidarr.Plugin.Crescendarr.Probe.dll"
-          echo "Only ephemeral CI config and synthetic paths were tested." >> "$GITHUB_STEP_SUMMARY"
+          for mode in baseline guard-negative probe; do
+            echo "Running fresh disposable Lidarr host mode: $mode"
+            python3 tools/experiments/run_disposable_lidarr.py \
+              "${{ steps.runtime.outputs.bin }}" \
+              "${RUNNER_TEMP}/crescendarr-compiled-probe/Lidarr.Plugin.Crescendarr.Probe.dll" \
+              "$mode"
+          done
+          echo "Baseline, missing opt-in, and synthetic interception passed in isolated configs." >> "$GITHUB_STEP_SUMMARY"
