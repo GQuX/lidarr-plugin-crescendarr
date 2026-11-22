@@ -1,3 +1,5 @@
+> **Superseded in part by the post-native-test proposal:** [Recoverable host import protocol v0.1](host-recoverable-import-protocol-v0.1.md) documents stronger requirements for staging, recovery, lyrics, edition stability and completion. Existing Lidarr does NOT expose the suggested API.
+
 > **Stable target update:** Evaluate against Lidarr v3.1.6.5079 before proposing changes; source includes plugin loading but there is no proven supported pre-import hook.
 
 # Optional Lidarr upstream extension: pre-import planning and completion protocol
@@ -23,7 +25,7 @@ public enum ImportPlanResultState { UseStockBehavior, HoldForReview, NoImproveme
 public enum ImportSettlement { FullyApplied, PartiallyApplied, NoImprovement, RequiresReview, RecoveryRequired }
 ```
 
-**Host requirements:** a planner runs *before* `replaceExisting` deletion and before permissive album-level rejections; core validates selected files against actual profile/edition/recording IDs; core owns atomic-as-possible staging, durable rollback, link updates, monitored release lock, `.lrc` source disposition, queue/history settlement and retries. A missing plugin behaves identically to stock Lidarr. No separate service or additional plugin required.
+**Host requirements:** a planner runs *before* `replaceExisting` deletion and before permissive album-level rejections; core validates selected files against actual profile/edition/recording IDs; core owns atomic-as-possible staging, durable rollback, link updates, monitored release lock, `.lrc` source disposition, queue/history settlement and retries. **A missing, failed, incompatible, or disabled plugin must trigger a host-owned SAFE baseline**, not silently reinstate stock Lidarr's v3.1.6.5079 album-wide pre-deletion. This is a necessary upstream/core behavior change; it is not achievable merely by a plugin guard. No separate service or additional plugin required.
 
 ## Compatibility acceptance
 
