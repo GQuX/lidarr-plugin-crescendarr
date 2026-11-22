@@ -246,7 +246,8 @@ def run_queue(bin_dir: Path, plugin_dll: Path, base: Path) -> None:
         check(status(host.wait_status(pushed_id, {"completed"})) == "completed",
               "command pushed by the plugin through IManageCommandQueue ran on the stock executor")
         time.sleep(2)
-        starts = re.findall(r"thread=\d+ START label=plugin-pushed [^\n]*", host.text())
+        # Count only the probe's own Console lines; NLog's console target echoes each one as "[Info] ...".
+        starts = re.findall(r"(?m)^CRESCENDARR_QUEUE \S+ thread=\d+ START label=plugin-pushed [^\n]*", host.text())
         note(f"OBSERVED plugin-pushed executions={len(starts)} pushedId={pushed_id} "
              "(startup push races the stock ApplicationStartedEvent requeue)")
         for line in starts:
@@ -281,13 +282,10 @@ def run_queue(bin_dir: Path, plugin_dll: Path, base: Path) -> None:
               "direct IDiskScanService.Scan completed WHILE the plugin disk-access command was Started")
         check(f"RescanFolders#{scan['id']}:Queued:disk=True" in direct_end,
               "...and while the queued stock RescanFolders was still waiting")
-        scan_seen = False
-        for _ in range(100):
-            scan_seen = re.search(r"Scanning " + re.escape(str(library)), host.host_log()) is not None
-            if scan_seen:
-                break
-            time.sleep(0.1)
-        check(scan_seen,
+        # Stock NLog echoes to stdout but cleanses user paths (/home/runner -> /home/(removed)), so match the
+        # stock scanner line by folder name strictly between the probe's own BEGIN and END markers.
+        window = host.text().split("DIRECT_SCAN_BEGIN", 1)[1].split("DIRECT_SCAN_END", 1)[0]
+        check(re.search(r"DiskScanService: Scanning \S*/synthetic-root", window) is not None,
               "the stock scanner actually ran its folder scan for the direct call")
         check(status(host.get(scan["id"])) == "queued", "queued stock scan still waiting after the direct scan")
 
