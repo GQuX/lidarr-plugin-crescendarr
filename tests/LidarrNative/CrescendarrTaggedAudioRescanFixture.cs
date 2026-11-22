@@ -254,6 +254,24 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(sqlite, Is.Not.Null, "importer failure type: " + importFailure.GetType().Name);
             Assert.That(sqlite.Message, Does.Contain("UNIQUE constraint failed: TrackFiles.Path"), "batch insert collided with rows the scan created");
             LogDb("after-interleaved-import-failure", w);
+
+            // Observed end state: DB and disk disagree, and nothing reports it.
+            var tracks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber);
+            var rows = Db.All<TrackFile>().ToDictionary(f => f.Id);
+            for (var i = 1; i <= Upgrades; i++)
+            {
+                Assert.That(File.ReadAllBytes(w.OwnedPaths[i]), Is.EqualTo(w.IncomingBytes[i]), $"incoming bytes in place for track {i}");
+            }
+
+            Assert.That(tracks[Sixth].TrackFileId, Is.EqualTo(0), "track six left unlinked although its incoming file is in place");
+            for (var i = Sixth + 1; i <= Upgrades; i++)
+            {
+                Assert.That(rows[tracks[i].TrackFileId].Quality.Quality, Is.EqualTo(Quality.MP3_192),
+                    $"track {i} still linked to the scan-created row describing the replaced 192k original");
+            }
+
+            Assert.That(Db.All<LyricFile>(), Is.Empty, "every lyric registration lost");
+            Log("M14_TAGGED_INTERLEAVED: importer batch insert failed on UNIQUE(TrackFiles.Path); tracks 7-11 rows describe replaced originals; track 6 unlinked; no lyric rows");
             AssertHeldInvariants(w);
         }
 

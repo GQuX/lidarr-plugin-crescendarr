@@ -1,6 +1,9 @@
 # M14: stock DiskScanService after the sixth-file failure and before recovery
 
-**Status: DRAFT. First scanner-only case **PASSED** on Linux native CI [45058139237](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45058139237): 58/58 native tests plus both separate-process stages. New real-event-during-import variant is NOT YET VERIFIED.** [Issue #38](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/38). Source pinned to unmodified Lidarr v3.1.6.5079 (`da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd`). No live host, audio library, NAS/SMB or download client.
+**Status: DRAFT.**
+
+- **Empty-decision controls PASSED.** Both empty-decision scans passed on Linux native CI: [45058139237](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45058139237) for the scanner-only case, and [45058579402](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45058579402) for the real-event-during-import variant, as confirmed by the independent review.
+- **Real tagged-audio scan characterized.** This uses real tag reading, identification and import decisions; see the new section below. [Issue #38](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/38). Source pinned to unmodified Lidarr v3.1.6.5079 (`da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd`). No live host, audio library, NAS/SMB or download client.
 
 ## Safety question
 
@@ -16,13 +19,82 @@ In `CrescendarrSqliteSyntheticMediaImportFixture.native_scan_before_recovering_s
 4. Observe the exact Track, TrackFile, LyricFile, AlbumRelease, staging and physical `.lrc` state. The current test expects a scan with no new import decisions to leave the orphaned sixth row/reference and verification evidence untouched. The initial scanner-only variant was observed to leave these state elements unchanged in native CI. Unexpected changes in the second variant must fail the test rather than being declared safe.
 5. Continue the already characterized **test-only** recovery: restore verified sixth audio with no overwrite, insert a fresh TrackFile ID, relink the track and reinsert the missing lyric association. Assert all 12 links and physical lyric bytes; protect the superior FLAC and monitored release.
 
-## Follow-up variant: real stock deletion-event fan-out BEFORE the failure (pending CI)
+## Follow-up variant: real stock deletion-event fan-out BEFORE the failure (PASSED, run 45058579402)
 
 The initial M12 sixth-transfer fault uses a mocked `IEventAggregator`, leaving a nonzero dangling `Track.TrackFileId` after the old TrackFile row is deleted. That may not match a running stock Lidarr instance: the real synchronous `TrackService.Handle(TrackFileDeletedEvent)` calls `TrackRepository.DetachTrackFile`.
 
 The second test, `native_delete_event_fanout_before_scan_then_recovers_sixth_transfer_failure`, registers the real `EventAggregator` and stock `TrackService` / `LyricFileService` handlers *before* the native importer begins. It performs the identical sixth physical transfer failure, asserts the observed deletion-handler result (hypothesis: sixth `TrackFileId` becomes zero, rather than a dangling nonzero ID), then invokes the same real stock scan with empty decisions before recovery. The repair still uses a fresh TrackFile ID and must preserve the protected superior track, selected release, staging and every `.lrc` byte.
 
-This new case is **not yet CI-verified**. If it fails, capture the actual event order and data changes rather than relaxing the safety requirement. These variants intentionally compare the mocked-event M12 failure with the real synchronous event-dispatch path, which is a fundamental difference for automatic recovery.
+**Verified in native CI run 45058579402.** With the real synchronous handlers active during the importer, track six's `TrackFileId` becomes **0** (`M14_REAL_EVENT_FAULT_OBSERVED`). The older mocked-event variant leaves a dangling positive ID instead. A production adapter and reconciler must handle both shapes. These variants intentionally compare the mocked-event M12 failure with the real synchronous event-dispatch path, which is a fundamental difference for automatic recovery.
+
+## Real tagged-audio scan: actual identification and import decisions (characterized)
+
+`tests/LidarrNative/CrescendarrTaggedAudioRescanFixture.cs` replaces the empty-decision stub with the **stock decision pipeline**. The existing empty-decision controls above are unchanged and still pass.
+
+**Synthetic audio, generated at runtime (no committed binaries).**
+- Tracks 1–11 and the incoming files are silent MPEG-1 Layer III files: owned 192 kbps, incoming 256 kbps.
+- Protected track 12 is a FLAC stream: a real STREAMINFO block with an exact sample count.
+- Everything is tagged with Lidarr's own `AudioTag.Write`, carrying a consistent MusicBrainz release, release-group, artist, recording and release-track IDs, track numbers and titles. Database durations match the files.
+- Before use, the stock `AudioTag` reader must return `IsValid`, the expected IDs, and the qualities `MP3-192`, `MP3-256` and `FLAC`.
+
+**Stock components exercised.**
+- **Scan and import:** `DiskScanService`, `MediaFileTableCleanupService`, and `ImportDecisionMaker` with **all 12** stock `IImportDecisionEngineSpecification` implementations.
+- **Identification:** `IdentificationService`, `CandidateService`, `TrackGroupingService`, `AugmentingService` with the stock aggregators, and `AudioTagService`.
+- **Writes and events:** `ImportApprovedTracks`, `UpgradeMediaFileService`, `TrackFileMovingService`, `RecycleBinProvider` and `DiskTransferService` on the real Linux disk provider, plus the real `EventAggregator` with the stock `TrackService` and `LyricFileService` deletion handlers. On `ArtistScannedEvent` it runs the stock `ExistingExtraFileService` with `ExistingLyricImporter`.
+- **Storage:** migrated SQLite.
+- **Test-controlled inputs:** naming, root folder, the history mock, and the import decisions for the *download* step, which is not the subject here.
+
+A recording decorator logs every real decision (`M14_TAGGED_DECISION`).
+
+Native CI [45063053067](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45063053067) passed all four scenarios. The final run is linked in PR #39.
+
+| Scenario | What the real scan did |
+|---|---|
+| **Control**: track six has a valid file on disk but no `TrackFile` row; nothing else is wrong | 12 approved decisions (11 arrive as `AdditionalFile`). **Every** existing track relinked to a **new** row, including the protected FLAC. **All 11 registered lyrics moved to the recycle bin**, and none re-registered. Track six linked to its file (`MP3-192`). |
+| **Restored original before a fresh row**: the sixth transfer fails after stock delete (real events, so `TrackFileId=0`), then the verified original is restored (M13's automatic `RestoreOriginalBytes`) | The scan **links track six to the restored original by itself** (`MP3-192`, bytes unchanged), and relinks every other track. The protected track's still-registered lyric is **recycled**. The 11 lyrics already DB-detached by the Crescendarr procedure survive in place. |
+| **Incoming transferred but unlinked**: the sixth transfer completes, then the importer fails before the row insert | The scan links track six to the incoming file (`MP3-256`), relinks everything else, and **recycles the protected track's lyric**. |
+| **Scan forced inside the importer** (after tracks 1–5 moved, before the batch insert; test-forced, see below) | 11 decisions; the scan creates rows for every path. The importer's `AddMany` then **throws** `UNIQUE constraint failed: TrackFiles.Path`, outside its per-track `try/catch`, so the whole import fails. End state: tracks 7–11 linked to scan-created rows that still describe the replaced 192k originals, although their paths now hold the incoming bytes; track six unlinked with its incoming file in place; no lyric rows left. |
+
+**Held in every scenario:**
+- the protected FLAC's **bytes**;
+- the staged rejected candidate;
+- every independent backup;
+- the single monitored MusicBrainz release;
+- unique `TrackFile` paths, which the stock schema enforces.
+
+**Root cause, from source.**
+1. `DiskScanService` calls the decision maker with `IncludeExisting = true`.
+2. `IdentificationService` adds every existing album file as an `AdditionalFile` local track.
+3. `ImportDecisionMaker` emits a decision for each one. `AdditionalFile` is consumed only by Manual Import.
+4. `ImportApprovedTracks`' existing-file branch deletes the row at each path with `DeleteMediaFileReason.ManualOverride` and re-adds it.
+5. `ExtraFileService.Handle(TrackFileDeletedEvent)` recycles linked extras for every reason except `NoLinkedEpisodes`.
+6. `ExistingLyricImporter` cannot map a `.lrc` back to tracks from its file name ("Cannot find related tracks"), so nothing is re-registered.
+
+**Two fixture artifacts were found and fixed before these results were accepted.** Earlier evidence runs showed lyrics surviving; that was false.
+1. The lyric handler was built before the real disk provider was set, so its mocked `FileExists` returned false.
+2. AutoMoqer caches resolved concrete types, so re-resolving returned that same mocked instance. The handler is now constructed explicitly.
+
+The older empty-decision M12/M14 cases never reach a lyric-bearing deletion, so their conclusions are unaffected.
+
+### What this changes for Crescendarr (implications; none are implemented here)
+
+- **A stock rescan is destructive to every *registered* lyric in an album the moment any unknown audio file appears there.** Three things can cause that:
+  - a partial import that leaves a placed-but-unlinked file;
+  - M13's own automatic `RestoreOriginalBytes`;
+  - a user dropping a file into the folder.
+- **M13's automatic restore is therefore not safe while other lyrics in the album remain registered and a stock scan can run.** Before any restore, an adapter must either keep every lyric in the album DB-detached and track them in the journal, or restore under a scan-excluded name and promote it only together with the fresh row. That is an executor design decision for M13/M15, not something proven here.
+- **A stock scan can complete M13's two operator-approval repairs by itself.** It inserts a fresh row for a restored original, or for a placed incoming file. The adapter's reconciler must treat "a fresh row appeared that we did not insert" as a legitimate observation, not an inconsistency. It must still re-verify bytes and edition, and accept that every other track also received a new row ID.
+- **Row identity is not stable across a stock rescan.** Every bound `TrackFile` ID can change even when no bytes changed. A journal must never treat a changed ID alone as data loss, nor rely on IDs across a scan without re-reading paths and bytes.
+- **The stock schema rejects identical duplicate paths** with `UNIQUE(TrackFiles.Path)`. M13's same-path duplicate checks remain defense in depth, and case-variant paths are still possible.
+
+### Still not proven
+
+- **The interleaved case is test-forced.** In stock Lidarr, scans and imports run as `RequiresDiskAccess` commands and are serialized by the command queue. A production race would need a code path outside that lock.
+- **Not exercised here:** the full host DI graph, other event subscribers, `ExistingMetadataImporter` / `ExistingOtherExtraImporter`, real naming and tag *writing*, fingerprinting, and a real Lidarr daemon or restart.
+- **The audio is real enough for the stock tag reader, but not decoded.** Silent zero-payload MPEG frames and a FLAC STREAMINFO without a decoded frame are sufficient for TagLib's properties, not for a decoder.
+- **No SMB/CIFS, NAS, downloader or user library** was involved.
+
+Issue #38 should stay open, and the **production write-enabled gate stays NO-GO**.
 
 ### Critical boundary and what this DOES NOT prove
 
