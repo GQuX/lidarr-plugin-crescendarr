@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Source-compatible, read-only host gate: NOT an installable plugin or write executor. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Crescendarr.Lidarr.Preflight</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <Target Name="RequireDisposableRunner" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(CrescendarrDisposableHostBuild)' != 'true'" Text="Preflight is a disposable ABI/test component only, not a production plugin."/>
+    <Error Condition="'$(LidarrBinDir)' == ''" Text="Pass the verified, disposable LidarrBinDir."/>
+  </Target>
+  <ItemGroup>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
