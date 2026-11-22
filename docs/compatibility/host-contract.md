@@ -1,3 +1,5 @@
+> **Binary ABI checkpoint (2026-11-22):** [GitHub Actions run 45019459665](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45019459665) downloaded the official Lidarr v3.1.6.5079 Linux x64 archive, verified SHA-256 `fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc`, and compiled `Crescendarr.Lidarr.Probe` against the published `Lidarr.Core.dll`, `Lidarr.Common.dll`, `NLog.dll`, and `System.IO.Abstractions.dll` assemblies. The prior assumption that binaries were named `NzbDrone.Core.dll`/`NzbDrone.Common.dll` was incorrect and has been fixed. **No Lidarr process was started, no plugin was loaded, and no import operation was attempted.** DI selection and all host safety behaviors remain untested.
+
 # Current stable development baseline (v0.2.0; 2026-11-22)
 
 **Target:** Lidarr tag [`v3.1.6.5079`](https://github.com/Lidarr/Lidarr/tree/v3.1.6.5079), .NET 8. The tagged source has the plugin loader, plugin metadata and `IDownloadedTracksImportService` with matching signatures. Installed LinuxServer package `3.1.6.5079-ls49` and runtime `.NET 8.0.27` were reported by the user, not inspected as binary artifacts. Source inspection is not a host runtime test.
@@ -34,7 +36,7 @@ Lidarr repository SHA: [`a754943cbd85cf9257e984506e0143ede18135fe`](https://gith
 
 ## Source-only probe caveats
 
-`Crescendarr.Lidarr.Probe` is **not** a release plugin and is not compiled here. The test deliberately does not delegate to the stock importer; therefore it can only test DI selection and *attempted* method interception. It cannot prove that actual imports will remain safe, that queue state is correct or that sidecars survive. Its assembly references must be checked against actual host binary names before building.
+`Crescendarr.Lidarr.Probe` is **not** a release plugin. It has now compiled in separate GitHub Actions against an exact pinned binary, but has never been loaded into a running Lidarr host. The test deliberately does not delegate to the stock importer; therefore it can only test DI selection and *attempted* method interception. It cannot prove that actual imports will remain safe, that queue state is correct or that sidecars survive. Its assembly references have been checked and corrected against the published stable binaries.
 
 ## Needed from the operator (read only)
 
