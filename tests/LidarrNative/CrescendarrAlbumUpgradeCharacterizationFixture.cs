@@ -16,6 +16,8 @@ using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.Datastore;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.MediaFiles;
+using NzbDrone.Core.MediaFiles.Events;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.MediaFiles.TrackImport;
 using NzbDrone.Core.MediaFiles.TrackImport.Specifications;
 using NzbDrone.Core.Music;
@@ -180,5 +182,65 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(results.Count(r => r.Result == ImportResultType.Rejected),
                 Is.EqualTo(1));
         }
+        [Test]
+        public void late_trackfile_bulk_insert_failure_follows_all_11_selected_upgrades()
+        {
+            // Characterizes a crash/DB-error window, NOT a safe recovery protocol.
+            // The upgrader is mocked: actual filesystem bytes and SQLite are not involved.
+            Mocker.GetMock<IMediaFileService>()
+                .Setup(s => s.AddMany(It.IsAny<List<TrackFile>>()))
+                .Throws(new IOException("SYNTHETIC: bulk TrackFile insert failed"));
+
+            Assert.Throws<IOException>(() => Subject.Import(_decisions, false));
+
+            Mocker.GetMock<IUpgradeMediaFiles>()
+                .Verify(s => s.UpgradeTrackFile(It.IsAny<TrackFile>(), It.IsAny<LocalTrack>(), It.IsAny<bool>()),
+                    Times.Exactly(ExpectedUpgrades));
+            Mocker.GetMock<IReleaseService>()
+                .Verify(s => s.SetMonitored(It.IsAny<AlbumRelease>()), Times.Once());
+            Mocker.GetMock<ITrackService>()
+                .Verify(s => s.SetFileIds(It.IsAny<List<Track>>()), Times.Never());
+            Mocker.GetMock<IEventAggregator>()
+                .Verify(s => s.PublishEvent(It.IsAny<TrackImportedEvent>()), Times.Never());
+            Mocker.GetMock<IRecycleBinProvider>()
+                .Verify(s => s.DeleteFile(_protectedTrackPath, It.IsAny<string>()), Times.Never());
+        }
+
+        [Test]
+        public void sixth_upgrade_failure_still_allows_ten_imports_and_one_failed_approved_decision()
+        {
+            // Native ImportApprovedTracks catches the sixth upgrader fault and continues.
+            // This proves control-flow only, not that the eleven originals remain intact.
+            var calls = 0;
+            Mocker.GetMock<IUpgradeMediaFiles>()
+                .Setup(s => s.UpgradeTrackFile(It.IsAny<TrackFile>(), It.IsAny<LocalTrack>(), It.IsAny<bool>()))
+                .Returns((TrackFile file, LocalTrack local, bool copyOnly) =>
+                {
+                    if (++calls == 6)
+                    {
+                        throw new IOException("SYNTHETIC: interrupted sixth media upgrade");
+                    }
+
+                    return new TrackFileMoveResult();
+                });
+
+            var results = Subject.Import(_decisions, false);
+
+            Assert.That(calls, Is.EqualTo(ExpectedUpgrades));
+            Assert.That(results.Count, Is.EqualTo(AlbumTrackCount));
+            Assert.That(results.Count(r => r.Result == ImportResultType.Imported), Is.EqualTo(10));
+            Assert.That(results.Count(r => r.ImportDecision.Approved && r.Errors.Count > 0), Is.EqualTo(1));
+            Assert.That(results.Count(r => !r.ImportDecision.Approved), Is.EqualTo(1));
+
+            Mocker.GetMock<IMediaFileService>()
+                .Verify(s => s.AddMany(It.Is<List<TrackFile>>(files => files.Count == 10)), Times.Once());
+            Mocker.GetMock<ITrackService>()
+                .Verify(s => s.SetFileIds(It.Is<List<Track>>(tracks => tracks.Count == 10)), Times.Once());
+            Mocker.GetMock<IEventAggregator>()
+                .Verify(s => s.PublishEvent(It.IsAny<TrackImportedEvent>()), Times.Exactly(10));
+            Mocker.GetMock<IRecycleBinProvider>()
+                .Verify(s => s.DeleteFile(_protectedTrackPath, It.IsAny<string>()), Times.Never());
+        }
+
     }
 }
