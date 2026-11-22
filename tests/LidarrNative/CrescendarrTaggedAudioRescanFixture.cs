@@ -77,6 +77,12 @@ namespace NzbDrone.Core.Test.MediaFiles
             /// <summary>A real scan runs INSIDE the importer, at track six, after the stock deletion events of tracks 1-6.</summary>
             ScanInterleavedInsideImporter,
 
+            /// <summary>Protect every physical lyric by DB detach before the stock scan.</summary>
+            AllAlbumLyricsDetached,
+
+            /// <summary>Partial lyric detach before a rescan: registered lyrics are recycled, independent backups can restore them.</summary>
+            PartialAlbumLyricDetach,
+
             /// <summary>Quarantined original is invisible until copied back to an unlinked final path.</summary>
             QuarantineThenPromoteBeforeRow,
         }
@@ -295,8 +301,94 @@ namespace NzbDrone.Core.Test.MediaFiles
                 Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]));
             }
 
-            AssertHeldInvariants(w, Scenario.ControlUnlinkedValidFile);
+            AssertHeldInvariants(w, Scenario.AllAlbumLyricsDetached);
             Log("P0_ALBUM_LYRIC_DETACH: full rescan did not recycle any unregistered lyric; all 12 physical bytes and backups survived; operator-style fresh row reattachment verified. This DOES NOT prove crash-safe or concurrent detach.");
+        }
+
+
+        // P0 issue #41: deliberate partial-detach interruption, without an actual process
+        // crash. Unlike an all-detached album, registered sidecars may be physically recycled
+        // by a stock scan during the unfinished journal step. Independently backed-up lyrics
+        // must be recoverable and explicitly rebound using the fresh, observed host rows.
+        [Test]
+        public void interrupted_partial_album_lyric_detach_requires_independent_backups_for_recovery()
+        {
+            var w = BuildWorld(sixthUnlinkedFromStart: true);
+            WireRealEventsAndStockDisk(w);
+            var recorder = WireRealScan(w);
+            var lyricBackups = new Dictionary<int, string>();
+
+            // The backup is an all-album prerequisite, not a per-upgrade-track optimization.
+            for (var i = 1; i <= Total; i++)
+            {
+                var backup = Path.Combine(w.Backups, $"partial-lyric-{i:D2}.lrc");
+                File.Copy(w.LyricPaths[i], backup, overwrite: false);
+                Assert.That(File.ReadAllBytes(backup), Is.EqualTo(w.LyricBytes[i]),
+                    $"track {i}: independent sidecar copy not verified before detach");
+                lyricBackups.Add(i, backup);
+            }
+
+            // Simulated interruption after only five of eleven registered rows are detached.
+            // The unselected superior FLAC lyric (track 12) is still linked to its old row.
+            for (var i = 1; i <= 5; i++) w.Lyrics.Delete(w.LyricIds[i]);
+            var stillRegistered = Db.All<LyricFile>();
+            Assert.That(stillRegistered.Count, Is.EqualTo(6), "six lyric rows should still be exposed to scan deletion");
+            Assert.That(stillRegistered.Any(l => l.Id == w.LyricIds[Total]), Is.True,
+                "protected higher-quality FLAC's lyric must still be registered for this adverse test");
+
+            var scan = RunRealScan(w, recorder, "interrupted-partial-lyric-detach");
+            AssertStockFullAlbumRescanCascade(w, scan, Scenario.PartialAlbumLyricDetach);
+            Assert.That(scan.RegisteredLyricTracksBefore.SetEquals(Enumerable.Range(7, 6)), Is.True,
+                "the stock scan must have seen exactly the six remaining registered sidecars");
+
+            // With NO plugin running during the scan, the only reliable recovery input is
+            // the independently preserved physical backup and a fresh host DB reading.
+            var recycledCount = 0;
+            for (var i = 1; i <= Total; i++)
+            {
+                if (!File.Exists(w.LyricPaths[i]))
+                {
+                    recycledCount++;
+                    File.Copy(lyricBackups[i], w.LyricPaths[i], overwrite: false);
+                }
+
+                Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]),
+                    $"track {i}: independent lyric restoration changed physical bytes");
+                Assert.That(File.ReadAllBytes(lyricBackups[i]), Is.EqualTo(w.LyricBytes[i]),
+                    $"track {i}: backup changed during an unprotected scan");
+            }
+            Assert.That(recycledCount, Is.EqualTo(6), "the six still-registered sidecars were physically recycled");
+
+            // Test-only reattachment. IDs MUST be new, because the old ones were deleted.
+            var oldLyricIds = w.LyricIds.Values.ToHashSet();
+            foreach (var i in Enumerable.Range(1, Total))
+            {
+                var currentTrackFileId = Db.All<Track>().Single(t => t.AbsoluteTrackNumber == i).TrackFileId;
+                Assert.That(currentTrackFileId, Is.GreaterThan(0), $"track {i} lacked an authoritative new TrackFile row");
+                w.Lyrics.Upsert(new LyricFile
+                {
+                    ArtistId = w.Artist.Id,
+                    AlbumId = w.Album.Id,
+                    TrackFileId = currentTrackFileId,
+                    RelativePath = Path.GetRelativePath(w.Artist.Path, w.LyricPaths[i]),
+                    Extension = ".lrc"
+                });
+            }
+
+            var rebound = Db.All<LyricFile>();
+            Assert.That(rebound.Count, Is.EqualTo(Total), "every physical lyric rebound to a fresh host row");
+            Assert.That(rebound.All(l => !oldLyricIds.Contains(l.Id)), Is.True,
+                "a deleted numeric lyric ID must never be reused for an insert");
+            foreach (var i in Enumerable.Range(1, Total))
+            {
+                var rowId = Db.All<Track>().Single(t => t.AbsoluteTrackNumber == i).TrackFileId;
+                var lyric = rebound.Single(l => l.TrackFileId == rowId);
+                Assert.That(Path.GetFullPath(Path.Combine(w.Artist.Path, lyric.RelativePath)),
+                    Is.EqualTo(w.LyricPaths[i]), $"track {i}: recovered host-relative lyric identity changed");
+                Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]));
+            }
+            AssertHeldInvariants(w, Scenario.PartialAlbumLyricDetach);
+            Log("P0_PARTIAL_DETACH: six registered lyrics recycled after simulated mid-detach interruption; independent backups restored their physical bytes, fresh rows rebound all twelve. No process crash, transactional host lock or SMB durability was proved.");
         }
 
         // P0 issue #41: scan-invisible backup/quarantine is a delay mechanism, not an atomic
