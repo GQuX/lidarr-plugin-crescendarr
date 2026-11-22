@@ -1,3 +1,5 @@
+> **Historical research only, superseded as the implementation roadmap.** The owner requires unmodified stock Lidarr and will not use a fork or upstream patches. See [plugin-only feasibility v0.1](stock-lidarr-plugin-only-feasibility-v0.1.md) and [issue #16](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/16). The proposed Lidarr core patches remain useful risk analysis but are no longer required or planned deliverables.
+
 # Incremental host-owned selective-import plan, v0.2
 
 **Date:** 2026-11-22. **Status:** research proposal, not implemented and not production safe.
