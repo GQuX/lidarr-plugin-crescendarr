@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Static manifest/safety checks only. DOES NOT compile C# or run a Lidarr plugin."""
+"""Advisory source-structure smoke checks only. NOT a security or import safety proof.
+
+These syntax/substring/regex checks cannot detect all side-effecting calls,
+indirect invocation, plugin startup fallback, filesystem races or DB writes.
+"""
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -21,8 +25,11 @@ for path in [ROOT / 'global.json', ROOT / 'docs/compatibility/m1-probe-report.te
 
 core_dir = ROOT / 'src/Crescendarr.Core'
 core_code = '\n'.join(p.read_text() for p in core_dir.rglob('*.cs'))
-for forbidden in [r'\bFile\.(Delete|Move|Copy|Write)', r'\bDirectory\.(Delete|Move)',
-                  r'\bSqliteConnection\b', r'\bHttpClient\b', r'\bProcess\.Start']:
+# Trivial catch for obvious accidents, NOT a complete side-effect analysis.
+for forbidden in [r'\bFile\.(Delete|Move|Copy|Write|Replace|Create|Open)',
+                  r'\bFileInfo\b', r'\bFileStream\b', r'\bDirectory\.(Delete|Move|Create)',
+                  r'\bSqliteConnection\b', r'\bHttpClient\b', r'\bProcess\.Start',
+                  r'\bIDiskProvider\b', r'\bIFileSystem\b']:
     require(re.search(forbidden, core_code) is None, f'Unexpected side-effect capability in Core: {forbidden}')
 
 probe_code = (ROOT / 'src/Crescendarr.Lidarr.Probe/ProbeImportService.cs').read_text()
@@ -32,7 +39,7 @@ require('NO DELEGATION' in probe_code, 'Probe no-delegation marker missing')
 require('original.Process' not in probe_code and 'original.ShouldDelete' not in probe_code,
         'Probe must not delegate to core import')
 require('public bool ShouldDeleteFolder' in probe_code and 'return false;' in probe_code,
-        'Probe might permit stage cleanup')
+        'Expected marker missing: probe cleanup stub (NOT validated by a parser)')
 
 spec_text = (ROOT / 'tests/Crescendarr.Core.Spec/Program.cs').read_text()
 header = spec_text.split('int failures = 0;')[0]
@@ -53,5 +60,6 @@ require(not any(ROOT.glob('**/*install*.sh')), 'Unexpected install script')
 if errors:
     for error in errors: print('FAIL', error, file=sys.stderr)
     sys.exit(1)
-print(f'STATIC_STRUCTURE_OK: {count} C# specs authored; XML/JSON parse; no forbidden Core write APIs.')
-print('NOT_RUN: .NET compile/spec execution, host DI probe, download lifecycle, filesystem/SMB safety.')
+print(f'ADVISORY_STRUCTURE_SMOKE_OK: {count} C# specs declared, XML/JSON parse, obvious risky source patterns not found.')
+print('NOT_PROVEN_BY_THIS_SCRIPT: C# semantics, plugin non-delegation, host behavior, real imports, lyrics, concurrency, recovery, or production safety.')
+print('CI separately runs C# planner specs and a disposable-host DI probe; those tests are NOT executed by this script.')
