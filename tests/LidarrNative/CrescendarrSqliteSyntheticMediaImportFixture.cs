@@ -44,6 +44,7 @@ namespace NzbDrone.Core.Test.MediaFiles
         [TestCase(false, false)]
         [TestCase(true, false)]
         [TestCase(false, true)]
+        [TestCase(true, true)]
         public void native_selective_import_relinks_real_sqlite_and_preserves_protected_bytes_and_lyrics(bool failAtSix, bool useStockDiskPipeline)
         {
             RunSelectiveImport(failAtSix, preserveInterruptedCheckpoint: false, useStockDiskPipeline);
@@ -275,11 +276,35 @@ namespace NzbDrone.Core.Test.MediaFiles
                 // unmodified native Linux disk, mount and symlink services, the
                 // real stock recycler and the real native track-file mover.
                 // Naming/root/script/permissions remain controlled test inputs.
-                Assert.That(failAtSix, Is.False, "Fault injection is a separate stage.");
                 Mocker.SetConstant<IProcMountProvider>(Mocker.Resolve<ProcMountProvider>());
                 Mocker.SetConstant<ISymbolicLinkResolver>(Mocker.Resolve<SymbolicLinkResolver>());
                 Mocker.SetConstant<IDiskProvider>(Mocker.Resolve<IDiskProvider>(FileSystemType.Actual));
-                Mocker.SetConstant<IDiskTransferService>(Mocker.Resolve<DiskTransferService>());
+                var nativeDiskTransfer = Mocker.Resolve<DiskTransferService>();
+                if (!failAtSix)
+                {
+                    Mocker.SetConstant<IDiskTransferService>(nativeDiskTransfer);
+                }
+                else
+                {
+                    // Inject failure ONLY at the actual sixth file's native
+                    // disk-transfer boundary, after stock upgrader has recycled
+                    // its original and deleted its TrackFile from real SQLite.
+                    // Every other transfer is executed by stock DiskTransferService.
+                    Mocker.GetMock<IDiskTransferService>()
+                        .Setup(x => x.TransferFile(It.IsAny<string>(), It.IsAny<string>(),
+                            It.IsAny<TransferMode>(), It.IsAny<bool>()))
+                        .Returns((string source, string destination, TransferMode mode, bool overwrite) =>
+                        {
+                            if (source == Path.Combine(staging, "06-synthetic.mp3") &&
+                                destination == physicalPaths[6])
+                            {
+                                throw new IOException("SYNTHETIC: actual sixth disk transfer interrupted after stock delete");
+                            }
+
+                            return nativeDiskTransfer.TransferFile(source, destination, mode, overwrite);
+                        });
+                }
+
                 Mocker.GetMock<IConfigService>()
                     .SetupGet(x => x.RecycleBin)
                     .Returns(recycle);
@@ -380,8 +405,10 @@ namespace NzbDrone.Core.Test.MediaFiles
                 Assert.That(Db.All<TrackFile>().Any(x => x.Id == orphan.TrackFileId), Is.False);
                 Assert.That(File.Exists(physicalPaths[6]), Is.False);
                 Assert.That(File.Exists(Path.Combine(staging, "06-synthetic.mp3")), Is.True);
-                Assert.That(File.ReadAllBytes(Path.Combine(recycle, Path.GetFileName(physicalPaths[6]))),
-                    Is.EqualTo(oldBytes[6]));
+                var sixthRecycled = useStockDiskPipeline
+                    ? Path.Combine(recycle, "synthetic-artist", "synthetic-album", Path.GetFileName(physicalPaths[6]))
+                    : Path.Combine(recycle, Path.GetFileName(physicalPaths[6]));
+                Assert.That(File.ReadAllBytes(sixthRecycled), Is.EqualTo(oldBytes[6]));
                 Assert.That(Db.All<LyricFile>().Any(x => x.TrackFileId == previous[6].Id), Is.False);
                 Assert.That(File.ReadAllBytes(lyricPaths[6]), Is.EqualTo(lyricBytes[6]));
 
