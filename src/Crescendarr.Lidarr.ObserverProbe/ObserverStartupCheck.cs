@@ -1,10 +1,13 @@
 using System;
 using System.IO;
+using System.Linq;
 using NLog;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.Download;
+using NzbDrone.Core.Download.Clients.Blackhole;
 using NzbDrone.Core.Lifecycle;
 using NzbDrone.Core.Messaging.Events;
+using NzbDrone.Core.ThingiProvider.Events;
 
 namespace NzbDrone.Core.Plugins;
 
@@ -13,7 +16,9 @@ namespace NzbDrone.Core.Plugins;
 /// Crucially: DOES NOT register/override an importer and never calls GetItems,
 /// Import, RemoveItem, SetMonitored, or any filesystem/DB mutation methods.
 /// </summary>
-public sealed class CrescendarrObserverStartupCheck : IHandle<ApplicationStartedEvent>
+public sealed class CrescendarrObserverStartupCheck : IHandle<ApplicationStartedEvent>,
+    IHandle<ProviderAddedEvent<IDownloadClient>>,
+    IHandle<ProviderUpdatedEvent<IDownloadClient>>
 {
     private readonly IDownloadClientFactory _clients;
     private readonly IConfigService _config;
@@ -44,7 +49,58 @@ public sealed class CrescendarrObserverStartupCheck : IHandle<ApplicationStarted
         Console.WriteLine(output);
     }
 
-    private static void RequireEphemeralCiHost()
+    // Provider registration via Lidarr's ordinary configuration API raises this
+    // event. We ONLY inspect the host's own configured, synthetic blackhole
+    // client, and ONLY when the disposable host's native CDH has been disabled.
+    // No downloader removals, import methods, database edits or media moves.
+    public void Handle(ProviderAddedEvent<IDownloadClient> message) => InspectSyntheticClient("added");
+
+    public void Handle(ProviderUpdatedEvent<IDownloadClient> message) => InspectSyntheticClient("updated");
+
+    private void InspectSyntheticClient(string eventName)
+    {
+        var root = RequireEphemeralCiHost();
+        if (_config.EnableCompletedDownloadHandling)
+        {
+            Console.WriteLine("CRESCENDARR_SYNTHETIC_CLIENT_SKIPPED CDH_ENABLED=True");
+            return;
+        }
+
+        foreach (var client in _clients.DownloadHandlingEnabled())
+        {
+            if (client is not UsenetBlackhole ||
+                client.Definition.Name != "Crescendarr Synthetic Blackhole" ||
+                client.Definition.Settings is not UsenetBlackholeSettings settings)
+                continue;
+
+            var watchRoot = Path.GetFullPath(settings.WatchFolder);
+            if (!IsWithin(root, watchRoot))
+                throw new InvalidOperationException("Synthetic client watch folder is not under disposable root.");
+
+            foreach (var item in client.GetItems())
+            {
+                var outputPath = Path.GetFullPath(item.OutputPath.FullPath);
+                if (!IsWithin(watchRoot, outputPath))
+                    throw new InvalidOperationException("Synthetic completed job escapes the configured watch folder.");
+
+                var result = "CRESCENDARR_SYNTHETIC_CLIENT_ITEM phase=" + eventName +
+                    " CDH_ENABLED=False STATUS=" + item.Status +
+                    " ID_MATCH=" + item.DownloadId.StartsWith("Crescendarr Synthetic Blackhole_", StringComparison.Ordinal) +
+                    " CAN_REMOVE=" + item.CanBeRemoved;
+                _logger.Warn(result);
+                Console.WriteLine(result);
+            }
+        }
+    }
+
+    private static bool IsWithin(string root, string target)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return target.Equals(root, comparison) || target.StartsWith(prefix, comparison);
+    }
+
+    private static string RequireEphemeralCiHost()
     {
         if (Environment.GetEnvironmentVariable("CI") != "true" ||
             Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
@@ -61,5 +117,7 @@ public sealed class CrescendarrObserverStartupCheck : IHandle<ApplicationStarted
             File.ReadAllText(Path.Combine(canonical, ".crescendarr-disposable-host")).Trim() !=
                 "CRESCENDARR_DISPOSABLE_HOST_V1")
             throw new InvalidOperationException("Observer synthetic host marker is invalid.");
+
+        return canonical;
     }
 }
