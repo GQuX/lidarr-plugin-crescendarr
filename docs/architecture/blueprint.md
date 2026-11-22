@@ -1,3 +1,5 @@
+> **Post-review architecture update (2026-11-22, ADR-023):** The prior design assumption that Lidarr's stock importer can safely own all irreversible side effects has been **invalidated** by stable source review. Album-wide pre-wipe, per-file delete-before-copy, linked sidecar cleanup, delayed DB writes, and plugin-disabled startup fallback are documented in [the independent-review triage](../reviews/2026-11-22-independent-review-triage.md). The proposed `IDownloadedTracksImportService` write-enabled wrapper is a **NO-GO**. All prior designs of a host-owned coordinator are proposed future *changes* to Lidarr, not capabilities of stock v3.1.6.5079. No production integration permitted.
+
 > **Revision note 2026-11-22:** v0.2.0 implementation now targets stable Lidarr v3.1.6.5079 and net8.0. Any net10/nightly-first recommendations below are historical research hypotheses, superseded by the new stable-target decision.
 
 # CRESCENDARR
@@ -40,7 +42,7 @@ Release search or acquisition policy changes; download-client plugins; unpacking
 
 ## 2. Architectural stance and trust boundaries
 
-The plugin should own **decision policy**; Lidarr should own **the irreversible side effects**, including DB track-file associations, import validation, filesystem moves, locks, download completion, and ordinary queue cleanup. A supported core-owned planner callback plus a typed completion contract is the preferred integration. Whether the current host supports it is **unknown**. A log-only `IDownloadedTracksImportService` wrapper is an investigation, **not a production dependency**.
+The plugin should own **decision policy**, but Lidarr must **first be changed or extended** to safely own irreversible operations. Stock v3.1.6.5079 cannot currently be assumed to provide recoverable side effects, track-safe deletion, truthful partial completion or reliable lyric preservation. A supported core-owned planner callback plus a typed completion contract is the preferred integration. Whether the current host supports it is **unknown**. A log-only `IDownloadedTracksImportService` wrapper is an investigation, **not a production dependency**.
 
 ```text
   Existing Lidarr download client (SABnzbd first fixture)
