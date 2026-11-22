@@ -1,6 +1,6 @@
 # ADR-026: Crash-safe per-track operation journal and disposable recovery lab (M13)
 
-**Status:** DRAFT for independent review. Lab only. **NO-GO for any write-enabled plugin**: host transactionality is unproven.
+**Status:** DRAFT, revision 2 after the independent review of PR #37 (findings A, B and C, below). Lab only. **NO-GO for any write-enabled plugin**: host transactionality is unproven.
 **Issue:** [#35](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/35). **Date:** 2026-11-22.
 **Evidence it is built on:** [native-sixth-transfer-failure](../compatibility/native-sixth-transfer-failure.md), [native-two-edition-sqlite-import](../compatibility/native-two-edition-sqlite-import.md), [native-event-dispatch-sqlite](../compatibility/native-event-dispatch-sqlite.md), [native-cross-process-sqlite-recovery](../compatibility/native-cross-process-sqlite-recovery.md).
 
@@ -28,14 +28,14 @@ Each operation binds the following. Its canonical SHA-256 (`BindingDigest`) is w
 - **Operation:** a canonical lowercase UUID; it is also the directory name.
 - **Download:** optional client definition ID, download ID and inventory evidence digest.
 - **Album and edition:** album ID, release-group MBID, and the monitored release ID plus **MusicBrainz release UUID**.
-- **Roots:** library, staging and operation, which must not overlap.
+- **Roots:** library, staging and operation, which must not overlap, plus the host-authoritative **artist root** (Lidarr `Artist.Path`), which must be strictly under the library. Original, destination and lyric paths must be under the artist root.
 - **Per track:**
   - track ID and recording MBID;
   - the original track-file ID (must be positive; multi-track files are rejected);
   - original, destination and incoming paths;
   - original and incoming SHA-256 and length;
   - the backup path;
-  - the registered lyric: ID, host relative path, physical path, SHA-256 and length, and backup path.
+  - the registered lyric: ID, host relative path, physical path, SHA-256 and length, and backup path. The physical path **must equal** the artist root joined with the registered relative path, mirroring stock `Path.Combine(artist.Path, extra.RelativePath)`.
 
 All paths are canonical, bounded, under their root, and must not alias each other even case-insensitively. Lyric relative paths reject `..` with either separator on Windows. That defect was found by the specs.
 
@@ -92,6 +92,11 @@ The deleted original's numeric track-file ID is **never reused**. `MarkDone(Nati
 Any of these yields `RequiresReview` and zero automatic actions other than recording the review:
 
 - fresh host data or the mount is unavailable;
+- the host artist root is unknown or differs from the bound artist root;
+- two host track-file rows, or two lyric rows, share a path **ignoring case**; or any host path is not clean NFC text;
+- before the native step, any row other than the bound original at a track's original or destination path;
+- a bound original track file linked to any other track;
+- duplicate track IDs;
 - album changed;
 - not exactly one monitored release, or the monitored MusicBrainz release changed;
 - recording MBID changed;
@@ -154,6 +159,84 @@ All of the evidence below comes from `tests/Crescendarr.Journal.Spec`:
   - "executor skips pre-call revalidation" fails L14. Before L14 existed, **no spec caught it**.
 - **Targeted cases:** edition switch, tamper matrix, corrupted backup, manifest corruption and duplication, stray temp files, the fake-host lyric hazard, and symlink escape (Linux CI only; recorded as `NOT_EXECUTED` where symlinks are not permitted).
 
+## Revision 2: independent review of PR #37 (findings A, B and C)
+
+The review ([comment](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/37#issuecomment-7083292447)) flagged three code-path gaps. Each was first **reproduced** by a spec added in an expected-red commit (`61e06c2`) against the unfixed code. That run is Linux CI [45053369119](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45053369119): X01, X02, X03 and X04 failed, and X05 passed. Each was then fixed, and every fix was confirmed by putting the defect back and seeing its spec fail.
+
+### A. Ancestor link redirected the lab sandbox (reproduced on Linux: X01, X02)
+
+- **Root cause.**
+  - Containment was lexical only.
+  - `Directory.CreateDirectory` ran before the locality check.
+  - Reopening inspected only the root's own link target.
+  - Mount detection matched an unresolved path string.
+
+  So `/tmp/alias/new-lab`, with `/tmp/alias -> elsewhere`, created a directory outside the sandbox. A lab whose `ops` directory had been replaced by a link would also write its journal through that link.
+- **Fix: a narrower contract** (`LabSafety`).
+  - The temp directory and **every ancestor** must be real directories with no symlink, junction or reparse point; otherwise the lab refuses to run.
+  - A lab root must be a **direct child** of that temp directory, named `crescendarr-*`.
+  - Locality is checked on the link-free temp directory **before** anything is created. The chain and locality are re-checked after a single-level create.
+  - The marker is created with `CreateNew`.
+  - A new root must not exist in any form, including as a dangling link.
+  - Reopening re-verifies the chain, a regular marker file, and that `library`, `staging`, `ops` and `recycle` are not links.
+  - Because the chain is link-free, the lexical path equals the physical path, so mount matching is meaningful. Missing mountinfo on Linux now refuses, and FUSE is refused.
+- **Residual risk.** These are still check-then-use path operations, not handle-relative `openat`/`O_NOFOLLOW` operations. A hostile process running as the **same user** could swap a directory for a link between a check and a write. The lab trusts same-user processes. Other users cannot rename entries in a sticky-bit temp directory. **This is a reduced-risk sandbox for synthetic data, not a containment guarantee.**
+- **Tests.**
+  - **X01:** an ancestor alias, a root that is itself a link, a marked root behind a link, and a real lab reopened through an alias. All are refused, and the test asserts nothing was created or modified through the alias.
+  - **X02:** the `ops` directory replaced by a link, and the lab guard refuses before any journal write.
+  - Both need Linux symlinks and are reported as `NOT_EXECUTED` on Windows hosts that refuse to create them.
+
+### B. A different row at a bound path could be classified as safe (reproduced: X03)
+
+- **Root cause.**
+  - `GlobalChecks` rejected duplicate row *IDs* but not distinct IDs at the same path.
+  - The `NativeNotStarted` branch computed `originalPathRows` without using it.
+  - The `Planned` phase relied on `originalIntact` alone.
+
+  With a stray row at track 103's original path (its destination differs), the operation ran to `Completed`.
+- **Fix.**
+  - **Global rule.** Any two host track-file rows whose paths are equal **ignoring case** block, on every host, because a NAS may fold case under a case-sensitive grammar. The same applies to two lyric rows with case-variant relative paths.
+  - **Clean NFC only.** Any host path that is not clean NFC text blocks, because ignore-case does not fold NFC and NFD spellings.
+  - **Before the native step,** the only row allowed at a track's original or destination path is the bound original.
+  - **Shared original file.** If any other track links to a bound original track file, the operation blocks, because the stock upgrader would orphan that track.
+  - **Duplicate track IDs block.** Before this fix the reconciler *threw* on such a snapshot; it now returns review.
+  - **`NativeNotStarted`** additionally requires no other row at the original path.
+- **Tests.**
+  - **X03** injects:
+    - a duplicate row before the first step;
+    - a case-variant row;
+    - a row during recovery, with operator approval enabled;
+    - a row immediately before the native call, through the interleave hook;
+    - a case-variant row at an already-upgraded destination, which must block the lyric relink;
+    - an unbound track sharing an original file.
+
+    It asserts review and **zero** detach, native, restore or insert actions.
+  - **R01** adds pure cases: duplicate, case-variant, destination-before-native, shared-file, duplicate-track-ID, case-variant-lyric and NFD rows.
+  - Removing any one of the global collision, per-track, or shared-file checks makes X03 or R01 fail.
+- **Limits.** Hardlinks, bind mounts and server-side aliases cannot be detected from path strings. ASCII and invariant ignore-case is not the full filesystem case-folding table. A future adapter must not treat "no collision found" as proof of uniqueness beyond these rules.
+
+### C. The physical lyric was not tied to the registered lyric (reproduced: X04)
+
+- **Root cause.** The binding accepted `Lyric.Path` and `Lyric.RelativePath` independently. Meanwhile the fake host, like stock Lidarr, resolves the registered lyric as `Path.Combine(artist.Path, extra.RelativePath)` (stock `ExtraFileService.cs:117` at v3.1.6.5079). The journal could therefore back up and verify a decoy while the real registered file stayed unverified. One X04 case deletes the real lyric entirely, and the old code still ran.
+- **Fix.**
+  - The binding now carries **`ArtistRoot`**, the host-authoritative `Artist.Path`. The manifest format is version 2, and version-1 manifests are refused.
+  - Validation requires `ArtistRoot` to be strictly under the library, and the original and destination paths to be under `ArtistRoot`.
+  - Validation also requires **`Lyric.Path == JoinUnder(ArtistRoot, RelativePath)`** exactly.
+  - `HostSnapshot.ArtistPath` is compared against `ArtistRoot` on **every** reconciliation; unknown or different blocks.
+  - The lab derives the physical lyric path from the host artist root plus the registered relative path, and never supplies it independently.
+- **Adapter precondition (not implementable in the pure layer).** The future host adapter **must** read `Artist.Path` and `LyricFile.RelativePath` from the same fresh host observation, and supply both to the binding and to every snapshot. If it cannot obtain them authoritatively, it must not build a binding. This ADR does not assume any Lidarr path semantics beyond the cited stock join.
+- **Tests.**
+  - **X04:** a decoy lyric is refused at creation, with no operation directory, no host change, and a correct operation still able to start afterwards. A deleted real lyric is refused at creation. The artist root changing just before the native call leads to review with no native call.
+  - **J01** gains mismatch, artist-outside-library and original-outside-artist variants.
+  - **R01** gains artist-root-changed and artist-root-unknown cases.
+
+### Additional defects found during this revision
+
+- **`OperationStore.Create` created the operation directory before validating the binding.** A refused binding left an empty, unreadable operation directory, which by the "no silent reset" rule blocked every later operation for the album. The binding is now validated first. X04 covers it.
+- **The reconciler threw on a contradictory snapshot** with duplicate track IDs, instead of returning review. Fixed, and covered by R01.
+- **The spec runner reported a spec that returned early on an unsupported host as PASS.** It now prints `NOT_EXECUTED` and counts it separately (`JOURNAL_SPEC_TOTALS`).
+- **Suspected, not reproduced:** a hardlink planted at the operation-owned backup path, followed by a backup resume that opens the destination for writing. That could truncate the original's inode. In X05, run against the old code, .NET's emulated sharing lock made the write fail first on both Windows and Linux. That lock is a .NET convention, not an OS guarantee, so copies now go to a fresh `CreateNew` temp file that is renamed into place. X05 asserts that the verified backup holds the original bytes and the operation completes.
+
 ## Remaining limits (treat as NO-GO until each is addressed)
 
 1. **FakeHost is not Lidarr.** It is one JSON file with one atomic write per "statement", and it encodes only the native-proven ordering. Real SQLite transactions, the full host event fan-out, `DiskScanService` and the real naming and tagging pipeline are not exercised. The future host adapter must prove that "insert fresh row, `SetFileIds` and lyric row" happens in one verified host transaction, or keep these as operator actions.
@@ -166,4 +249,8 @@ All of the evidence below comes from `tests/Crescendarr.Journal.Spec`:
 5. **Stock behaviour the adapter must still enforce:**
    - The native importer calls `SetMonitored` before moving. An adapter must pin and pre-verify the edition, as the native two-edition test showed. The journal only detects the change afterwards.
    - Stock renaming or tagging may change the destination path or bytes. The binding assumes a known destination and unchanged incoming bytes; a real adapter would observe a mismatch and stop for review.
-6. **Recycle copies are never cleaned, and backups are retained indefinitely.** A retention and cleanup policy, including operator acknowledgement of review states, is future work.
+6. **Lab sandbox is not a containment guarantee.** It relies on check-then-use path operations, so it trusts same-user processes (finding A).
+7. **Path identity rules are string rules.** Hardlinks, bind mounts, server-side aliases and full Unicode case folding are not detected (finding B). The adapter must supply authoritative host identities and must not widen these rules.
+8. **The adapter must supply `Artist.Path` and `LyricFile.RelativePath` from one fresh host observation** (finding C). The pure layer cannot establish lyric identity without that trusted input.
+9. **Manifest rollback is undetectable.** If an older but internally valid manifest generation were restored (for example from a filesystem snapshot), nothing in the lab detects it. Observation-based reconciliation would then classify against the older phase, and most mismatches would surface as review, but this is unproven.
+10. **Recycle copies are never cleaned, and backups are retained indefinitely.** A retention and cleanup policy, including operator acknowledgement of review states, is future work.

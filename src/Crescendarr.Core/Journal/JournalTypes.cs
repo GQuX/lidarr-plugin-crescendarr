@@ -77,7 +77,12 @@ public sealed record TrackBinding(
 /// <summary>Optional link to the read-only download inventory (M10).</summary>
 public sealed record DownloadBinding(int ClientDefinitionId, string DownloadId, string? InventoryEvidenceDigest);
 
-/// <summary>Immutable operation binding. Its canonical digest is fixed for the operation's lifetime.</summary>
+/// <summary>
+/// Immutable operation binding. Its canonical digest is fixed for the operation's lifetime.
+/// <see cref="ArtistRoot"/> is the host-authoritative artist directory (Lidarr <c>Artist.Path</c>);
+/// stock Lidarr resolves a registered extra file as <c>Path.Combine(artist.Path, extra.RelativePath)</c>
+/// (ExtraFileService.cs:117 at v3.1.6.5079), so every bound lyric's physical path must equal that join.
+/// </summary>
 public sealed record OperationBinding(
     string OperationId,
     DownloadBinding? Download,
@@ -89,7 +94,8 @@ public sealed record OperationBinding(
     string LibraryRoot,
     string StagingRoot,
     string OperationRoot,
-    ImmutableArray<TrackBinding> Tracks);
+    ImmutableArray<TrackBinding> Tracks,
+    string ArtistRoot);
 
 /// <summary>Mutable progress of one track, changed only by <see cref="JournalEngine"/>.</summary>
 public sealed record TrackProgress(
@@ -109,7 +115,7 @@ public sealed record OperationManifest(
     string BindingDigest,
     ImmutableArray<TrackProgress> Progress)
 {
-    public const int FormatVersion = 1;
+    public const int FormatVersion = 2;
 
     public TrackProgress ProgressFor(int trackId) => Progress.Single(p => p.TrackId == trackId);
 

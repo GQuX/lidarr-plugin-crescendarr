@@ -98,7 +98,10 @@ public static class LabScenario
         {
             var hostTrack = host.Tracks.Single(t => t.TrackId == trackId);
             var lyric = host.Lyrics.Single(l => l.TrackFileId == hostTrack.TrackFileId);
-            var lyricPath = Path.Combine(host.ArtistPath, lyric.RelativePath);
+            // Physical lyric identity is DERIVED from the host-authoritative artist root and the registered
+            // relative path, exactly as stock Lidarr resolves it; it is never supplied independently.
+            var lyricPath = JournalValidation.JoinUnder(host.ArtistPath, lyric.RelativePath, LabSafety.Style)
+                ?? throw new InvalidOperationException("Registered lyric relative path does not resolve under the artist root.");
             return new TrackBinding(
                 trackId, hostTrack.RecordingMbid, hostTrack.TrackFileId,
                 OriginalPath(lab, trackId), DestinationPath(lab, trackId), IncomingPath(lab, trackId),
@@ -108,6 +111,6 @@ public static class LabScenario
         }).ToImmutableArray();
 
         return new OperationBinding(operationId, new DownloadBinding(1, "Synthetic_job-1_638700000000000000", null), AlbumId, ReleaseGroupMbid,
-            MonitoredReleaseId, MonitoredReleaseMbid, LabSafety.Style, Library(lab), Staging(lab), opRoot, tracks);
+            MonitoredReleaseId, MonitoredReleaseMbid, LabSafety.Style, Library(lab), Staging(lab), opRoot, tracks, host.ArtistPath);
     }
 }

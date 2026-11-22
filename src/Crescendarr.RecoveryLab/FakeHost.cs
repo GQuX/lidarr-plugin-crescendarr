@@ -48,9 +48,9 @@ public sealed class FakeHost
     public HostSnapshot Snapshot()
     {
         if (File.Exists(Path.Combine(_labRoot, UnavailableMarker)) || !File.Exists(_path))
-            return new HostSnapshot(false, 0, ImmutableArray<HostRelease>.Empty, ImmutableArray<HostTrack>.Empty, ImmutableArray<HostTrackFile>.Empty, ImmutableArray<HostLyric>.Empty);
+            return new HostSnapshot(false, 0, ImmutableArray<HostRelease>.Empty, ImmutableArray<HostTrack>.Empty, ImmutableArray<HostTrackFile>.Empty, ImmutableArray<HostLyric>.Empty, null);
         var s = Load();
-        return new HostSnapshot(true, s.AlbumId, s.Releases.ToImmutableArray(), s.Tracks.ToImmutableArray(), s.TrackFiles.ToImmutableArray(), s.Lyrics.ToImmutableArray());
+        return new HostSnapshot(true, s.AlbumId, s.Releases.ToImmutableArray(), s.Tracks.ToImmutableArray(), s.TrackFiles.ToImmutableArray(), s.Lyrics.ToImmutableArray(), s.ArtistPath);
     }
 
     public void DeleteLyricRow(int lyricFileId, string fault)

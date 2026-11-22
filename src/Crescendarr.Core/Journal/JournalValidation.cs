@@ -51,6 +51,9 @@ public static class JournalValidation
             !binding.OperationRoot.EndsWith(binding.OperationId, StringComparison.Ordinal))
             errors.Add("OperationRoot must end with the operation ID.");
 
+        if (!IsCanonical(binding.ArtistRoot, style)) errors.Add("ArtistRoot is not a canonical absolute path.");
+        else if (binding.LibraryRoot is null || !PathCanonicalizer.IsStrictlyUnder(binding.ArtistRoot, binding.LibraryRoot, style)) errors.Add("ArtistRoot must be strictly under LibraryRoot.");
+
         if (binding.Tracks.IsDefaultOrEmpty) errors.Add("At least one track is required.");
         else if (binding.Tracks.Length > MaxTracks) errors.Add($"At most {MaxTracks} tracks per operation.");
         else
@@ -66,8 +69,8 @@ public static class JournalValidation
                 if (track.TrackId <= 0) errors.Add($"{label}: TrackId must be positive.");
                 if (track.OriginalTrackFileId <= 0) errors.Add($"{label}: OriginalTrackFileId must be positive (only replacements are journaled).");
                 if (!IsUuid(track.RecordingMbid)) errors.Add($"{label}: RecordingMbid must be a lowercase canonical UUID.");
-                RequireUnder(errors, label, "OriginalPath", track.OriginalPath, binding.LibraryRoot, style);
-                RequireUnder(errors, label, "DestinationPath", track.DestinationPath, binding.LibraryRoot, style);
+                RequireUnder(errors, label, "OriginalPath", track.OriginalPath, binding.ArtistRoot, style);
+                RequireUnder(errors, label, "DestinationPath", track.DestinationPath, binding.ArtistRoot, style);
                 RequireUnder(errors, label, "IncomingPath", track.IncomingPath, binding.StagingRoot, style);
                 RequireUnder(errors, label, "BackupAudioPath", track.BackupAudioPath, binding.OperationRoot, style);
                 RequireContent(errors, label, "Original", track.Original);
@@ -81,7 +84,12 @@ public static class JournalValidation
                 {
                     if (lyric.LyricFileId <= 0) errors.Add($"{label}: LyricFileId must be positive.");
                     if (!IsSafeRelative(lyric.RelativePath, style)) errors.Add($"{label}: lyric relative path is not a safe relative path.");
-                    RequireUnder(errors, label, "Lyric.Path", lyric.Path, binding.LibraryRoot, style);
+                    RequireUnder(errors, label, "Lyric.Path", lyric.Path, binding.ArtistRoot, style);
+                    // Physical identity: the backed-up file must be exactly the file the host's registered
+                    // relative path names, or the journal would protect a different file.
+                    if (IsSafeRelative(lyric.RelativePath, style) && binding.ArtistRoot is not null &&
+                        !string.Equals(JoinUnder(binding.ArtistRoot, lyric.RelativePath, style), lyric.Path, StringComparison.Ordinal))
+                        errors.Add($"{label}: Lyric.Path is not ArtistRoot joined with the registered relative path.");
                     RequireUnder(errors, label, "Lyric.BackupPath", lyric.BackupPath, binding.OperationRoot, style);
                     RequireContent(errors, label, "Lyric", lyric.Content);
                     allPaths.AddRange(new[] { lyric.Path, lyric.BackupPath });
@@ -95,6 +103,16 @@ public static class JournalValidation
         }
 
         return errors.ToImmutable();
+    }
+
+    /// <summary>Joins a validated relative path under a canonical root and canonicalizes the result; null if unsafe.</summary>
+    public static string? JoinUnder(string root, string relative, PathStyle style)
+    {
+        if (!IsSafeRelative(relative, style)) return null;
+        var separator = style == PathStyle.Windows ? '\\' : '/';
+        var normalized = style == PathStyle.Windows ? relative.Replace('/', '\\') : relative;
+        var check = PathCanonicalizer.Canonicalize(root + separator + normalized, style);
+        return check.Verdict == PathVerdict.Ok && PathCanonicalizer.IsStrictlyUnder(check.CanonicalPath!, root, style) ? check.CanonicalPath : null;
     }
 
     public static bool IsUuid(string? value) =>

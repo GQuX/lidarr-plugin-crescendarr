@@ -24,14 +24,19 @@ public sealed record HostTrackFile(int TrackFileId, string Path);
 
 public sealed record HostLyric(int LyricFileId, int TrackFileId, string RelativePath);
 
-/// <summary>A fresh host/database view. <see cref="Obtained"/> false means it could not be read.</summary>
+/// <summary>
+/// A fresh host/database view. <see cref="Obtained"/> false means it could not be read.
+/// <see cref="ArtistPath"/> is the host's current artist directory (Lidarr <c>Artist.Path</c>), the root that
+/// registered lyric relative paths are resolved against.
+/// </summary>
 public sealed record HostSnapshot(
     bool Obtained,
     int AlbumId,
     ImmutableArray<HostRelease> Releases,
     ImmutableArray<HostTrack> Tracks,
     ImmutableArray<HostTrackFile> TrackFiles,
-    ImmutableArray<HostLyric> Lyrics);
+    ImmutableArray<HostLyric> Lyrics,
+    string? ArtistPath);
 
 // ---------- results ----------
 
@@ -158,11 +163,32 @@ public static class Reconciler
     {
         var b = m.Binding;
         if (host.AlbumId != b.AlbumId) blockers.Add("host album ID differs from the bound album");
+        if (host.ArtistPath is null || !string.Equals(host.ArtistPath, b.ArtistRoot, StringComparison.Ordinal))
+            blockers.Add("host artist root is unknown or differs from the bound artist root (lyric identity cannot be established)");
+
+        // Identity comparison rule: any two host rows whose paths are equal ignoring case are a
+        // collision on EVERY host, because a NAS may fold case even under a case-sensitive path
+        // grammar. Hardlinks and bind mounts cannot be detected from paths and remain an adapter duty.
+        if (!host.Tracks.IsDefault && host.Tracks.GroupBy(t => t.TrackId).Any(g => g.Count() > 1)) blockers.Add("duplicate track IDs in host snapshot");
+        if (!host.TrackFiles.IsDefault && host.TrackFiles.GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1))
+            blockers.Add("two track-file rows share a path (compared ignoring case)");
+        // Ignore-case comparison does not fold Unicode normalization (NFC vs NFD spellings of the same
+        // name, as some SMB servers return). Bound paths are already NFC-only; any host path that is not
+        // clean NFC cannot be compared reliably, so it blocks.
+        if ((!host.TrackFiles.IsDefault && host.TrackFiles.Any(f => f.Path is null || InventoryText.UnsafeCharacter(f.Path) is not null)) ||
+            (!host.Lyrics.IsDefault && host.Lyrics.Any(l => l.RelativePath is null || InventoryText.UnsafeCharacter(l.RelativePath) is not null)))
+            blockers.Add("a host row path is not clean NFC text and cannot be compared for identity");
+        if (!host.Lyrics.IsDefault && host.Lyrics.GroupBy(l => l.RelativePath, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1))
+            blockers.Add("two lyric rows share a relative path (compared ignoring case)");
 
         var monitored = host.Releases.IsDefault ? new List<HostRelease>() : host.Releases.Where(r => r.Monitored).ToList();
         if (monitored.Count != 1) blockers.Add($"expected exactly one monitored release, found {monitored.Count}");
         else if (monitored[0].ReleaseId != b.MonitoredReleaseId || !string.Equals(monitored[0].ReleaseMbid, b.MonitoredReleaseMbid, StringComparison.Ordinal))
             blockers.Add("monitored MusicBrainz release changed since the operation was planned");
+
+        // Contradictory snapshots must produce review, never an exception: stop before any per-track
+        // lookup that assumes uniqueness.
+        if (blockers.Count > 0 && (host.Tracks.IsDefault || host.Tracks.GroupBy(t => t.TrackId).Any(g => g.Count() > 1))) return;
 
         foreach (var track in b.Tracks)
         {
@@ -185,6 +211,22 @@ public static class Reconciler
                 if (linked.Any(l => track.Lyric is null || l.LyricFileId != track.Lyric.LyricFileId))
                     blockers.Add($"track {track.TrackId}: an unbound lyric row is linked to the original track file");
             }
+
+            var progress = m.ProgressFor(track.TrackId);
+            var beforeNative = progress.Phase < TrackPhase.Upgraded && progress.InFlight != JournalStep.NativeUpgrade;
+            if (beforeNative && !host.TrackFiles.IsDefault)
+            {
+                // Before the native step, the ONLY row allowed at the original or destination path is the bound original.
+                if (host.TrackFiles.Any(f => f.TrackFileId != track.OriginalTrackFileId &&
+                        (string.Equals(f.Path, track.OriginalPath, StringComparison.OrdinalIgnoreCase) || string.Equals(f.Path, track.DestinationPath, StringComparison.OrdinalIgnoreCase))))
+                    blockers.Add($"track {track.TrackId}: another track-file row refers to the original or destination path");
+            }
+
+            // The stock upgrader deletes the linked file for every track it touches; a bound original
+            // shared with any other track would orphan that track.
+            if (progress.Phase < TrackPhase.Upgraded && !host.Tracks.IsDefault &&
+                host.Tracks.Any(x => x.TrackId != track.TrackId && x.TrackFileId == track.OriginalTrackFileId))
+                blockers.Add($"track {track.TrackId}: the original track file is linked to another track");
 
             var original = Row(host, track.OriginalTrackFileId);
             if (original is not null && !PathCanonicalizer.PathsEqual(original.Path, track.OriginalPath, b.PathStyle))
@@ -310,7 +352,7 @@ public static class Reconciler
                 return (TrackCondition.Upgraded, Auto(RecoveryAction.RecordStepDone, "native upgrade observed complete", destinationRows[0].TrackFileId), reasons);
 
             // A. Stock recycles the original first; untouched original + row + link + staged incoming means it never began.
-            if (linkOrig && originalRow is not null && originalAtOriginal && i.Is(t.Incoming) && (same || !d.Exists) && destinationRows.Count == 0)
+            if (linkOrig && originalRow is not null && originalAtOriginal && i.Is(t.Incoming) && (same || !d.Exists) && destinationRows.Count == 0 && originalPathRows.Count == 0)
                 return (TrackCondition.NativeNotStarted, Auto(RecoveryAction.AbandonStep, "native upgrade observably not started"), reasons);
 
             // Rolled back by an approved operator action: original bytes back, linked to a fresh row.

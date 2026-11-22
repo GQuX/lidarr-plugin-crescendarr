@@ -182,6 +182,7 @@ public static class JournalCodec
         w.WriteString("libraryRoot", b.LibraryRoot);
         w.WriteString("stagingRoot", b.StagingRoot);
         w.WriteString("operationRoot", b.OperationRoot);
+        w.WriteString("artistRoot", b.ArtistRoot);
         w.WriteStartArray("tracks");
         foreach (var t in b.Tracks)
         {
@@ -265,7 +266,7 @@ public static class JournalCodec
 
     private static OperationBinding ReadBinding(JsonElement e)
     {
-        Exact(e, "operationId", "download", "albumId", "releaseGroupMbid", "monitoredReleaseId", "monitoredReleaseMbid", "pathStyle", "libraryRoot", "stagingRoot", "operationRoot", "tracks");
+        Exact(e, "operationId", "download", "albumId", "releaseGroupMbid", "monitoredReleaseId", "monitoredReleaseMbid", "pathStyle", "libraryRoot", "stagingRoot", "operationRoot", "artistRoot", "tracks");
         DownloadBinding? download = null;
         var d = e.GetProperty("download");
         if (d.ValueKind != JsonValueKind.Null)
@@ -290,7 +291,7 @@ public static class JournalCodec
         }).ToImmutableArray();
 
         return new OperationBinding(Str(e, "operationId"), download, Int(e, "albumId"), Str(e, "releaseGroupMbid"), Int(e, "monitoredReleaseId"),
-            Str(e, "monitoredReleaseMbid"), ParseEnum<PathStyle>(Str(e, "pathStyle")), Str(e, "libraryRoot"), Str(e, "stagingRoot"), Str(e, "operationRoot"), tracks);
+            Str(e, "monitoredReleaseMbid"), ParseEnum<PathStyle>(Str(e, "pathStyle")), Str(e, "libraryRoot"), Str(e, "stagingRoot"), Str(e, "operationRoot"), tracks, Str(e, "artistRoot"));
     }
 
     private static ContentId Content(JsonElement e)

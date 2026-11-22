@@ -36,9 +36,11 @@ public sealed class OperationStore
 
         var directory = binding.OperationRoot;
         if (System.IO.Directory.Exists(directory) || File.Exists(directory)) throw new InvalidOperationException("Duplicate operation ID: directory already exists.");
+        // Validate BEFORE creating anything: an invalid binding must leave no operation directory behind
+        // (an empty one would be unreadable and would block every later operation for the album).
+        var manifest = JournalEngine.Begin(binding);
         Faults.Hit("intent.beforeManifest");
         System.IO.Directory.CreateDirectory(directory);
-        var manifest = JournalEngine.Begin(binding);
         DurableFiles.WriteAtomically(Path.Combine(directory, BindingDigestName), Encoding.ASCII.GetBytes(manifest.BindingDigest), "intent.binding");
         DurableFiles.WriteAtomically(Path.Combine(directory, ManifestName), Encoding.UTF8.GetBytes(JournalCodec.Encode(manifest)), $"manifest.g{manifest.Generation}");
         Faults.Hit("intent.afterManifest");

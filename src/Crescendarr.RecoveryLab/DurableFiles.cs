@@ -29,12 +29,21 @@ public static class DurableFiles
         Faults.Hit($"{faultPrefix}.afterRename");
     }
 
-    /// <summary>Copies into an operation-owned path (overwrite allowed), flushing to disk.</summary>
+    /// <summary>
+    /// Copies into an operation-owned path, flushing to disk. The bytes are written to a FRESH temp file
+    /// (CreateNew) and then renamed over the destination. Opening the destination itself for writing
+    /// would truncate whatever inode it names; if a hardlink to the original had been planted at the
+    /// backup path, that could destroy the original. NOT reproduced: in spec X05 against the old code,
+    /// .NET's emulated file-sharing lock made the write fail first on both Windows and Linux. That lock
+    /// is a .NET convention, not an OS guarantee, so this is a defense-in-depth fix.
+    /// </summary>
     public static void CopyDurably(string source, string destination, string faultPrefix)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var directory = Path.GetDirectoryName(destination)!;
+        Directory.CreateDirectory(directory);
+        var temp = Path.Combine(directory, $".{Path.GetFileName(destination)}.copy-{Guid.NewGuid():N}.partial~");
         using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, ChunkSize))
-        using (var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, ChunkSize, FileOptions.WriteThrough))
+        using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, ChunkSize, FileOptions.WriteThrough))
         {
             var buffer = new byte[ChunkSize];
             long written = 0;
@@ -56,7 +65,8 @@ public static class DurableFiles
             output.Flush(flushToDisk: true);
         }
 
-        NativeDurability.FsyncDirectory(Path.GetDirectoryName(destination)!);
+        File.Move(temp, destination, overwrite: true); // replaces the directory entry, never the linked inode's bytes
+        NativeDurability.FsyncDirectory(directory);
     }
 
     /// <summary>Restores a file to a path that must not exist; never overwrites.</summary>

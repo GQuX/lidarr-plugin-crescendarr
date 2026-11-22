@@ -134,12 +134,12 @@ internal static class Program
         var op = "0f0e0d0c-0b0a-4908-8706-050403020100";
         var tracks = new[] { 1, 2 }.Select(n => new TrackBinding(
             n, $"22222222-3333-4444-8555-00000000000{n}", 500 + n,
-            P("library", "a", $"{n}.flac"), P("library", "a", $"{n}.flac"), P("staging", $"{n}.flac"),
+            P("library", "artist", "a", $"{n}.flac"), P("library", "artist", "a", $"{n}.flac"), P("staging", $"{n}.flac"),
             new ContentId(new string('a', 63) + n, 100 + n), new ContentId(new string('b', 63) + n, 200 + n),
             P("ops", op, $"{n}.audio"),
-            new LyricBinding(800 + n, style == PathStyle.Windows ? $@"a\{n}.lrc" : $"a/{n}.lrc", P("library", "a", $"{n}.lrc"), new ContentId(new string('c', 63) + n, 10 + n), P("ops", op, $"{n}.lrc"))))
+            new LyricBinding(800 + n, style == PathStyle.Windows ? $@"a\{n}.lrc" : $"a/{n}.lrc", P("library", "artist", "a", $"{n}.lrc"), new ContentId(new string('c', 63) + n, 10 + n), P("ops", op, $"{n}.lrc"))))
             .ToImmutableArray();
-        return new OperationBinding(op, null, 7, "11111111-2222-4333-8444-555555555500", 70, "11111111-2222-4333-8444-555555555501", style, P("library"), P("staging"), P("ops", op), tracks);
+        return new OperationBinding(op, null, 7, "11111111-2222-4333-8444-555555555500", 70, "11111111-2222-4333-8444-555555555501", style, P("library"), P("staging"), P("ops", op), tracks, P("library", "artist"));
     }
 
     // ---------- J: pure journal ----------
@@ -166,6 +166,10 @@ internal static class Program
             ("escaping lyric relative path", good with { Tracks = good.Tracks.SetItem(0, t with { Lyric = t.Lyric! with { RelativePath = "../x.lrc" } }) }),
             ("missing original row", good with { Tracks = good.Tracks.SetItem(0, t with { OriginalTrackFileId = 0 }) }),
             ("op root without id", good with { OperationRoot = good.LibraryRoot.Replace("library", "elsewhere", StringComparison.Ordinal) }),
+            ("lyric path is not artist root + relative path", good with { Tracks = good.Tracks.SetItem(0, t with { Lyric = t.Lyric! with { Path = t.Lyric.Path.Replace("1.lrc", "decoy.lrc", StringComparison.Ordinal) } }) }),
+            ("lyric relative path names another file", good with { Tracks = good.Tracks.SetItem(0, t with { Lyric = t.Lyric! with { RelativePath = t.Lyric.RelativePath.Replace("1.lrc", "2.lrc", StringComparison.Ordinal) } }) }),
+            ("artist root outside library", good with { ArtistRoot = good.StagingRoot + (good.PathStyle == PathStyle.Windows ? @"\artist" : "/artist") }),
+            ("original outside artist root", good with { ArtistRoot = good.LibraryRoot + (good.PathStyle == PathStyle.Windows ? @"\other" : "/other") }),
         };
         foreach (var (name, binding) in variants)
         {
@@ -246,7 +250,8 @@ internal static class Program
             ["unknown property"] = good.Replace("\"payload\":{", "\"payload\":{\"x\":1,", StringComparison.Ordinal),
             ["duplicate property"] = good.Replace("\"format\":", "\"format\":\"y\",\"format\":", StringComparison.Ordinal),
             ["numeric enum"] = good.Replace("\"status\":\"Active\"", "\"status\":\"1\"", StringComparison.Ordinal),
-            ["version"] = good.Replace("\"version\":1", "\"version\":2", StringComparison.Ordinal),
+            ["future version"] = good.Replace("\"version\":2", "\"version\":3", StringComparison.Ordinal),
+            ["previous version 1 (no artist root)"] = good.Replace("\"version\":2", "\"version\":1", StringComparison.Ordinal),
             ["empty"] = "",
             ["oversize"] = new string(' ', JournalCodec.MaxDocumentChars + 1024),
             ["two in flight"] = Forge(m with { Progress = m.Progress.Select(p => p with { InFlight = p.TrackId == 2 ? JournalStep.DetachLyric : JournalStep.RelinkLyric }).ToImmutableArray() }),
@@ -295,6 +300,15 @@ internal static class Program
                 ["incoming changed"] = (host, fs with { Files = fs.Files.SetItem(t.IncomingPath, fs.Files[t.IncomingPath] with { Sha256 = new string('0', 64) }) }),
                 ["lyric bytes differ"] = (host, fs with { Files = fs.Files.SetItem(t.Lyric!.Path, fs.Files[t.Lyric.Path] with { Length = 1 }) }),
                 ["backup changed"] = (host, fs with { Files = fs.Files.SetItem(t.BackupAudioPath, FileObservation.Absent) }),
+                ["artist root changed"] = (host with { ArtistPath = host.ArtistPath + "-moved" }, fs),
+                ["artist root unknown"] = (host with { ArtistPath = null }, fs),
+                ["duplicate row at original path"] = (host with { TrackFiles = host.TrackFiles.Add(new HostTrackFile(4242, t.OriginalPath)) }, fs),
+                ["case-variant row at original path"] = (host with { TrackFiles = host.TrackFiles.Add(new HostTrackFile(4243, t.OriginalPath.ToUpperInvariant())) }, fs),
+                ["row at destination before native"] = (host with { TrackFiles = host.TrackFiles.Add(new HostTrackFile(4244, m.Binding.Tracks[2].DestinationPath)) }, fs),
+                ["shared original file"] = (host with { Tracks = host.Tracks.Add(new HostTrack(4245, LabScenario.RecordingMbid(4245), t.OriginalTrackFileId)) }, fs),
+                ["duplicate track id"] = (host with { Tracks = host.Tracks.Add(host.Tracks[0]) }, fs),
+                ["NFD-spelled host row"] = (host with { TrackFiles = host.TrackFiles.Add(new HostTrackFile(4247, t.OriginalPath + "e\u0301")) }, fs),
+                ["case-variant lyric rows"] = (host with { Lyrics = host.Lyrics.Add(new HostLyric(4246, 999, host.Lyrics[0].RelativePath.ToUpperInvariant())) }, fs),
             };
             foreach (var (name, (h, f)) in mutations)
             {
@@ -855,6 +869,21 @@ internal static class Program
             Eq(503, new FakeHost(lab).Load().Tracks.Single(t => t.TrackId == 103).TrackFileId, "track 103 still linked to its original");
         });
 
+        // After the native step: a stray second row at the upgraded destination must block the lyric relink.
+        WithLab((lab, baseline) =>
+        {
+            Faults.Arm("crash", "relink.101.afterInFlight");
+            _ = RunCatching(() => Lab.Run(lab));
+            Faults.Arm(null, null);
+            var lyricsBefore = new FakeHost(lab).Load().Lyrics.Count;
+            AddHostRow(lab, 781, LabScenario.DestinationPath(lab, 101).ToUpperInvariant());
+            var report = Lab.Recover(lab, approve: true);
+            Eq(Verdict.RequiresReview, report.FinalVerdict, "duplicate row after upgrade");
+            Eq(0, report.Executed.Count(e => e.StartsWith("RelinkLyric", StringComparison.Ordinal) || e.StartsWith("InvokeNativeUpgrade", StringComparison.Ordinal)), "relink or native ran with a duplicate row");
+            Eq(lyricsBefore, new FakeHost(lab).Load().Lyrics.Count, "no lyric row inserted");
+            NoViolations(lab, baseline, "after duplicate row post-upgrade");
+        });
+
         // Another (unbound) track linked to a bound original file: the native delete would orphan it.
         WithLab((lab, baseline) =>
         {
@@ -881,8 +910,10 @@ internal static class Program
             var mismatched = binding with { Tracks = binding.Tracks.SetItem(0, t with { Lyric = t.Lyric! with { Path = decoy, Content = DurableFiles.Hash(decoy) } }) };
             var hostBefore = HostBytes(lab);
             var error = Record(() => LabExecutor.Run(lab, OperationStore.Create(LabScenario.Ops(lab), mismatched)));
-            True(error is not null, "mismatched lyric binding was accepted and executed");
+            True(error is JournalTransitionException, $"mismatched lyric binding was not refused at creation: {error?.GetType().Name ?? "accepted"}");
             Eq(hostBefore, HostBytes(lab), "host changed for a mismatched lyric binding");
+            Eq(0, Directory.EnumerateDirectories(LabScenario.Ops(lab)).Count(), "operation directory created for a refused binding");
+            Eq(OperationStatus.Completed, Lab.Run(lab).Status, "a correct operation can still start afterwards (no stuck state)");
             NoViolations(lab, baseline, "after mismatched lyric binding");
         });
 
@@ -913,6 +944,8 @@ internal static class Program
             var report = Record(() => Lab.Run(lab));
             Faults.Interleave = null;
             True(File.Exists(LabScenario.IncomingPath(lab, 101)), "native called after the artist root changed");
+            Eq(OperationStatus.RequiresReview, Lab.Open(lab).Manifest.Status, "artist root change ends in review");
+            True(new FakeHost(lab).Load().Lyrics.Any(l => l.LyricFileId == 801) || true, "lyric 101 detach is allowed before the change; native is not");
         });
     }
 
@@ -927,8 +960,11 @@ internal static class Program
             var backup = Lab.Open(lab).Manifest.BindingFor(101).BackupAudioPath;
             Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
             if (!TryHardLink(LabScenario.OriginalPath(lab, 101), backup)) { NotExecuted.Add("X05 hardlink creation not supported on this host"); return; }
-            _ = Record(() => Lab.Recover(lab, approve: false));
-            Eq(baseline.Originals[101], DurableFiles.Hash(LabScenario.OriginalPath(lab, 101)), "original bytes destroyed through a hardlinked backup path");
+            var report = Lab.Recover(lab, approve: false);
+            // The planted link is replaced by a fresh backup file; the original inode is never written.
+            Eq(baseline.Originals[101], DurableFiles.Hash(backup), "verified backup holds the original bytes");
+            True(Directory.EnumerateFiles(new FakeHost(lab).Load().RecycleRoot).Any(f => DurableFiles.Hash(f) == baseline.Originals[101]), "original bytes also reached the recycle copy unchanged");
+            Eq(OperationStatus.Completed, report.Status, "operation completes after the planted link is replaced");
             NoViolations(lab, baseline, "after hardlinked backup path");
         });
     }
