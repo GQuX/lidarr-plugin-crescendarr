@@ -1,0 +1,72 @@
+name: Crash-safe journal and recovery lab
+
+# M13: pure write-ahead journal specs plus a DISPOSABLE LOCAL recovery lab that creates
+# synthetic files under the runner's temp directory, injects crashes/failures at every
+# fault point, and SIGKILLs separate lab processes. No Lidarr, NAS, SMB, downloader or
+# network service is involved, and nothing is packaged or released.
+on:
+  push:
+    paths:
+      - 'src/Crescendarr.Core/**'
+      - 'src/Crescendarr.RecoveryLab/**'
+      - 'tests/Crescendarr.Journal.Spec/**'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - '.github/workflows/journal.yml'
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Core/**'
+      - 'src/Crescendarr.RecoveryLab/**'
+      - 'tests/Crescendarr.Journal.Spec/**'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - '.github/workflows/journal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  journal-lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Advisory check - journal core stays pure (no host types, I/O, clock or network)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=src/Crescendarr.Core/Journal
+          # Pattern check only; it cannot prove purity.
+          if grep -nE '^\s*using\s+(NzbDrone|Lidarr|System\.IO|System\.Net|Microsoft\.Data|System\.Data|System\.Diagnostics)' "$dir"/*.cs; then
+            echo "Journal core imports a host, I/O, network, process or database namespace" >&2; exit 1
+          fi
+          if grep -nE '\b(File|Directory|DriveInfo|FileSystemWatcher|Environment|Console|Process|HttpClient|Socket)\s*\.|new\s+(FileStream|StreamWriter|StreamReader|HttpClient)\b|DateTime(Offset)?\.(Now|UtcNow)|\bRandom\b' "$dir"/*.cs; then
+            echo "Journal core references storage, environment, process, network, wall clock or randomness" >&2; exit 1
+          fi
+          if grep -rnP '[^\x00-\x7F]' "$dir" src/Crescendarr.RecoveryLab tests/Crescendarr.Journal.Spec --include=*.cs; then
+            echo "Non-ASCII source characters" >&2; exit 1
+          fi
+          if grep -rnE 'IImportApprovedTracks|IUpgradeMediaFiles|IRecycleBinProvider|RemoveItem|HttpClient|SqliteConnection|SQLiteConnection' src/Crescendarr.RecoveryLab src/Crescendarr.Core/Journal; then
+            echo "Lab or journal references a host importer, downloader, network or database API" >&2; exit 1
+          fi
+          echo "ADVISORY_JOURNAL_PURITY_OK (pattern check, not a proof)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run journal specs (crash and failure matrices, SIGKILL subprocesses)
+        env:
+          CRESCENDARR_RECOVERY_LAB: DISPOSABLE_LOCAL_ONLY
+        run: dotnet run --project tests/Crescendarr.Journal.Spec/Crescendarr.Journal.Spec.csproj --configuration Release
+      - name: Planner and inventory specs still pass against the same core build
+        run: |
+          dotnet run --project tests/Crescendarr.Core.Spec/Crescendarr.Core.Spec.csproj --configuration Release
+          dotnet run --project tests/Crescendarr.Core.Inventory.Spec/Crescendarr.Core.Inventory.Spec.csproj --configuration Release
+      - name: Confirm no lab directories were left behind
+        shell: bash
+        run: |
+          left=$(find "${RUNNER_TEMP:-/tmp}" /tmp -maxdepth 1 -name 'crescendarr-m13-*' 2>/dev/null | wc -l)
+          echo "leftover lab directories: $left" >> "$GITHUB_STEP_SUMMARY"
+          test "$left" -eq 0

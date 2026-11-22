@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- DISPOSABLE LOCAL LAB ONLY. Never packaged, never installed into Lidarr, never pointed at a NAS. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <!-- Required only by the LibraryImport source generator for the Linux directory fsync. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Crescendarr.Core/Crescendarr.Core.csproj" />
+  </ItemGroup>
+</Project>
