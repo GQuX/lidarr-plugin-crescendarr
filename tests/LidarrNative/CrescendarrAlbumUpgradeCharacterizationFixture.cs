@@ -226,6 +226,8 @@ namespace NzbDrone.Core.Test.MediaFiles
                 });
 
             var results = Subject.Import(_decisions, false);
+            // The importer intentionally logs the caught synthetic I/O failure as a warning.
+            ExceptionVerification.ExpectedWarns(1);
 
             Assert.That(calls, Is.EqualTo(ExpectedUpgrades));
             Assert.That(results.Count, Is.EqualTo(AlbumTrackCount));
