@@ -1,6 +1,6 @@
 # M12: persisted SQLite handoff between distinct test processes
 
-**Status:** experimental, pending clean CI. **Date:** 2026-11-22. **Source:** stock Lidarr stable v3.1.6.5079 pinned to `da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd`. **Tracking:** [#23](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/23), [PR #27](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/27).
+**Status:** **PASSED in disposable CI**, not production readiness. [Native run #45039966505](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45039966505): **36/36 base tests**, plus **1/1 preparation** and **1/1 recovery** in distinct NUnit test processes. **Date:** 2026-11-22. **Source:** stock Lidarr stable v3.1.6.5079 pinned to `da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd`. **Tracking:** [#23](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/23), [PR #27](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/27).
 
 ## What the new two-process test does
 
