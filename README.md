@@ -79,6 +79,12 @@ This is **not** the full native 12-track importer with actual disk mover. The fi
 
 **Executor invariant:** before any native import or file changes, verify the selected monitored release ID from the host against every incoming release; block the whole plan on mismatch. The pure planner checks IDs, but no write-capable host adapter or crash-safe journal exists yet.
 
+## Native sixth-file transfer fault now tested with stock mover
+
+[Native sixth-transfer failure test](docs/compatibility/native-sixth-transfer-failure.md) injects a failure at the **real mover's IDiskTransferService call** after Lidarr has recycled the original file and deleted its SQLite TrackFile row. The remaining file transfers run through stock native disk service; native SQLite shows the orphaned TrackFileId and file absence, then a test-owned verified backup is reattached with a fresh native file ID and lyric row. [CI: 46/46 native tests plus two separate-process recovery stages passed](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45049365277).
+
+This is **not** automatic journal-backed recovery or a true process crash. A separate [M13 journal implementation task](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/35) is underway in parallel; all experiments remain disposable and production is NO-GO.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
