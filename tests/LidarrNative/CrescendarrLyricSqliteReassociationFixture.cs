@@ -31,6 +31,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             var original = new LyricFile
             {
                 ArtistId = 42,
+                AlbumId = 22,
                 TrackFileId = 51,
                 RelativePath = Path.Combine("album", "01-title.lrc"),
                 Extension = ".lrc"
@@ -52,6 +53,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             {
                 Id = 0,
                 ArtistId = stored.ArtistId,
+                AlbumId = stored.AlbumId,
                 TrackFileId = 152,
                 RelativePath = stored.RelativePath,
                 Extension = stored.Extension
@@ -71,6 +73,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             var original = new LyricFile
             {
                 ArtistId = 42,
+                AlbumId = 22,
                 TrackFileId = 51,
                 RelativePath = Path.Combine("album", "02-title.lrc"),
                 Extension = ".lrc"
