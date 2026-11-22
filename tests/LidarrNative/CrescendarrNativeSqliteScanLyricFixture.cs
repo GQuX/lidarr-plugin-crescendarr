@@ -11,11 +11,13 @@ using FizzWare.NBuilder;
 using Moq;
 using NUnit.Framework;
 using NzbDrone.Common.Disk;
+using NzbDrone.Common;
 using NzbDrone.Core.Datastore;
 using NzbDrone.Core.Extras.Files;
 using NzbDrone.Core.Extras.Lyrics;
 using NzbDrone.Core.MediaFiles;
 using NzbDrone.Core.MediaFiles.Events;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Qualities;
 using NzbDrone.Core.Test.Framework;
@@ -25,9 +27,11 @@ namespace NzbDrone.Core.Test.MediaFiles
     [TestFixture]
     public class CrescendarrNativeSqliteScanLyricFixture : DbTest
     {
-        [TestCase(false)]
-        [TestCase(true)]
-        public void missing_file_cleanup_detaches_real_track_and_registered_lyrics_need_early_unlink(bool unlinkBeforeScan)
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        [TestCase(true, true)]
+        public void missing_file_cleanup_detaches_real_track_and_registered_lyrics_need_early_unlink(bool unlinkBeforeScan, bool useRealEventAggregator)
         {
             var temp = Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m12-native-scan");
             var artistPath = Path.Combine(temp, "music", "synthetic-artist");
@@ -95,11 +99,31 @@ namespace NzbDrone.Core.Test.MediaFiles
             // Actual SQLite-backed service types, not a fabricated mock DB.
             Mocker.SetConstant<IMediaFileRepository>(Mocker.Resolve<MediaFileRepository>());
             Mocker.SetConstant<ITrackRepository>(Mocker.Resolve<TrackRepository>());
-            Mocker.SetConstant<IMediaFileService>(Mocker.Resolve<MediaFileService>());
-            Mocker.SetConstant<ITrackService>(Mocker.Resolve<TrackService>());
+            var realTrackService = Mocker.Resolve<TrackService>();
+            Mocker.SetConstant<ITrackService>(realTrackService);
             var extraRepository = Mocker.Resolve<ExtraFileRepository<LyricFile>>();
             Mocker.SetConstant<IExtraFileRepository<LyricFile>>(extraRepository);
             var lyrics = Mocker.Resolve<LyricFileService>();
+
+            if (useRealEventAggregator)
+            {
+                // Register the ACTUAL synchronous TrackService and LyricFileService
+                // handlers with the unmodified stock EventAggregator. No manual
+                // Handle(...) call will occur in this branch.
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandle<TrackFileDeletedEvent>>())
+                    .Returns(new List<IHandle<TrackFileDeletedEvent>>
+                    {
+                        realTrackService,
+                        lyrics
+                    });
+                var aggregator = Mocker.Resolve<EventAggregator>();
+                Mocker.SetConstant<IEventAggregator>(aggregator);
+            }
+
+            // The actual native media service now publishes TrackFileDeletedEvent
+            // through either the test's old mock or the real event dispatcher.
+            Mocker.SetConstant<IMediaFileService>(Mocker.Resolve<MediaFileService>());
 
             var lyric = new LyricFile
             {
@@ -136,14 +160,17 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(File.ReadAllBytes(retainedOriginal), Is.EqualTo(originalBytes));
             Assert.That(File.Exists(originalPath), Is.False);
 
-            // This is the REAL stock media table cleanup method against real
-            // IMediaFileService/ITrackService and migrated SQLite repositories.
-            // The synchronous TrackFileDeletedEvent cannot be observed through
-            // the mocked aggregator, so the next line calls the real native
-            // lyric handler explicitly using the original, artist-linked file.
+            // The REAL stock media table cleanup uses real media, track and
+            // lyric repositories against migrated SQLite. With real dispatch,
+            // published TrackFileDeletedEvent reaches native synchronous handlers
+            // automatically. The fallback path keeps our prior direct-handler
+            // characterization intact as a cross-check.
             Mocker.Resolve<MediaFileTableCleanupService>()
                 .Clean(artistPath, new List<string>());
-            lyrics.Handle(new TrackFileDeletedEvent(file, DeleteMediaFileReason.MissingFromDisk));
+            if (!useRealEventAggregator)
+            {
+                lyrics.Handle(new TrackFileDeletedEvent(file, DeleteMediaFileReason.MissingFromDisk));
+            }
 
             Assert.That(Db.All<TrackFile>(), Is.Empty);
             Assert.That(Db.All<Track>().Single().TrackFileId, Is.EqualTo(0),
