@@ -27,14 +27,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="\${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
+          archive="${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
           curl --fail --location --retry 3 --retry-delay 2 \
             --output "$archive" \
             "https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz"
           printf '%s  %s\n' 'fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc' "$archive" | sha256sum --check
-          mkdir -p "\${RUNNER_TEMP}/crescendarr-clean-host"
-          tar -xzf "$archive" -C "\${RUNNER_TEMP}/crescendarr-clean-host"
-          bin="$(dirname "$(find "\${RUNNER_TEMP}/crescendarr-clean-host" -type f -name Lidarr.Core.dll -print -quit)")"
+          mkdir -p "${RUNNER_TEMP}/crescendarr-clean-host"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/crescendarr-clean-host"
+          bin="$(dirname "$(find "${RUNNER_TEMP}/crescendarr-clean-host" -type f -name Lidarr.Core.dll -print -quit)")"
           if [[ -z "$bin" || ! -f "$bin/Lidarr" || ! -f "$bin/Lidarr.Common.dll" ]]; then
             echo "Expected official Lidarr binary layout is missing" >&2
             exit 1
@@ -47,9 +47,9 @@ jobs:
           set -euo pipefail
           dotnet build src/Crescendarr.Lidarr.Probe/Crescendarr.Lidarr.Probe.csproj \
             -c Release --nologo \
-            --output "\${RUNNER_TEMP}/crescendarr-compiled-probe" \
+            --output "${RUNNER_TEMP}/crescendarr-compiled-probe" \
             -p:CrescendarrDisposableHostBuild=true \
-            -p:LidarrBinDir="\${{ steps.runtime.outputs.bin }}"
+            -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}"
       - name: Start fresh disposable Lidarr host, test binding, and stop
         shell: bash
         env:
@@ -57,6 +57,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/experiments/run_disposable_lidarr.py \
-            "\${{ steps.runtime.outputs.bin }}" \
-            "\${RUNNER_TEMP}/crescendarr-compiled-probe/Lidarr.Plugin.Crescendarr.Probe.dll"
+            "${{ steps.runtime.outputs.bin }}" \
+            "${RUNNER_TEMP}/crescendarr-compiled-probe/Lidarr.Plugin.Crescendarr.Probe.dll"
           echo "Only ephemeral CI config and synthetic paths were tested." >> "$GITHUB_STEP_SUMMARY"
