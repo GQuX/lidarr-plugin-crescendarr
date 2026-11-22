@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-22. **Experiment:** disposable in-process observer, not an importer.
 **Host:** official stock Lidarr v3.1.6.5079 linux-core-x64, archive SHA-256 `fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc`.
-**CI:** [read-only stock host integration run #45032801185](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45032801185) passed. The later restart/uninstall enhancement is a **separate test to be validated before PR merge**.
+**CI:** [stock host integration run #45033044145](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45033044145) **passed**, including completed-item observation **and** a restart of the same host with the observer removed. The first observation-only run [#45032801185](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45032801185) passed separately.
 
 ## Setup, with no production systems
 
@@ -31,6 +31,20 @@ DISPOSABLE_CDH_OFF_COMPLETED_OBSERVER_OK
 
 The CI script also asserts that the fake `.lrc` bytes and temporary album inventory remained unchanged, the CDH configuration still read as OFF, and the test-only synthetic sentinel remained intact.
 
+## Plugin absent: same disposable Lidarr restarted
+
+After the first host shut down, the CI harness **removed the observer plugin directory** and restarted the exact same stock Lidarr appdata and built-in Usenet Blackhole provider, with no Crescendarr observer opt-in or assembly present.
+
+The restart completed, and the harness verified:
+- `enableCompletedDownloadHandling` remained **false** after restart, read back via stock API.
+- The synthetic built-in Blackhole provider remained configured.
+- The tiny staged `.lrc` was still byte-identical, and no other file appeared in its synthetic album directory.
+- The plugin's startup marker was absent in the new host logs.
+
+CI emitted `DISPOSABLE_CDH_OFF_PLUGIN_ABSENT_RESTART_OK` in [run #45033044145](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45033044145).
+
+This establishes a **narrow fallback**: CDH OFF persisted across an ordinary uninstall/restart while the synthetic staging path survived. It does **not** simulate a plugin assembly-load exception, a real SABnzbd item, enabled manual imports or in-progress audio writes.
+
 ## What this proves
 
 - A **real configured stock download client** inside an unmodified Lidarr runtime can expose a completed item to an **in-process additive plugin** while native Completed Download Handling is OFF.
@@ -49,4 +63,4 @@ The CI script also asserts that the fake `.lrc` bytes and temporary album invent
 
 **Decision:** the *completed-download discovery seam* is technically feasible on the pinned stock host. A write-enabled per-track merge **remains NO-GO** until its host-native side effects, edition/lyric retention and failure recovery are tested with local synthetic media and database transactions.
 
-Next: qualify persistent-CDH-off plugin uninstall/restart in the same disposable host, then design a read-only queue inventory and error/retry state machine. Preserve the single-plugin and stock-Lidarr requirement; no production installs, config updates or real media are authorized.
+Next: characterize a read-only queue inventory and restart-safe error/retry state machine using completed jobs from supported Lidarr clients. The host-wide disabled-CDH fallback is now tested for ordinary observer removal; failure during plugin construction, actual imports and manual processing remain untested. Preserve the single-plugin and stock-Lidarr requirement; no production installs, config updates or real media are authorized.
