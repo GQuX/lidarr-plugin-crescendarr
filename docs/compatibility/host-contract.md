@@ -1,3 +1,5 @@
+> **2026-11-22 disposable runtime milestone:** [Verified CI run](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45020067092) selected the non-delegating Crescendarr service through DryIoc on stock Lidarr v3.1.6.5079, resolved the concrete stock importer, and intercepted a synthetic method call. Status **EXPERIMENTAL_INTERCEPTION_ONLY**. This does not validate real downloads, queue settlement, import safety, other plugins, or a supported extension API. [Full evidence](disposable-runtime-evidence.md).
+
 > **Binary ABI checkpoint (2026-11-22):** [GitHub Actions run 45019459665](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45019459665) downloaded the official Lidarr v3.1.6.5079 Linux x64 archive, verified SHA-256 `fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc`, and compiled `Crescendarr.Lidarr.Probe` against the published `Lidarr.Core.dll`, `Lidarr.Common.dll`, `NLog.dll`, and `System.IO.Abstractions.dll` assemblies. The prior assumption that binaries were named `NzbDrone.Core.dll`/`NzbDrone.Common.dll` was incorrect and has been fixed. **No Lidarr process was started, no plugin was loaded, and no import operation was attempted.** DI selection and all host safety behaviors remain untested.
 
 # Current stable development baseline (v0.2.0; 2026-11-22)
@@ -8,7 +10,7 @@ The earlier net10 research snapshot below remains valuable for pipeline hazards,
 
 # Lidarr host contract: research snapshot and outstanding integration proof
 
-**Status:** pinned source inspected, **no real host exercised**.
+**Status:** pinned source inspected; a **disposable** stock Lidarr 3.1.6.5079 host now exercised; no production host or real imports tested.
 
 Lidarr repository SHA: [`a754943cbd85cf9257e984506e0143ede18135fe`](https://github.com/Lidarr/Lidarr/commit/a754943cbd85cf9257e984506e0143ede18135fe) (inspected 2026-11-22). That is a reference source snapshot, **not** the user's installed Lidarr binary identity.
 
@@ -36,7 +38,7 @@ Lidarr repository SHA: [`a754943cbd85cf9257e984506e0143ede18135fe`](https://gith
 
 ## Source-only probe caveats
 
-`Crescendarr.Lidarr.Probe` is **not** a release plugin. It has now compiled in separate GitHub Actions against an exact pinned binary, but has never been loaded into a running Lidarr host. The test deliberately does not delegate to the stock importer; therefore it can only test DI selection and *attempted* method interception. It cannot prove that actual imports will remain safe, that queue state is correct or that sidecars survive. Its assembly references have been checked and corrected against the published stable binaries.
+`Crescendarr.Lidarr.Probe` is **not** a release plugin. It compiled and loaded in a disposable stock v3.1.6.5079 host and intercepted a synthetic test call, but has never processed a tracked download or been deployed to production. The test deliberately does not delegate to the stock importer; therefore it can only test DI selection and *attempted* method interception. It cannot prove that actual imports will remain safe, that queue state is correct or that sidecars survive. Its assembly references have been checked and corrected against the published stable binaries.
 
 ## Needed from the operator (read only)
 
