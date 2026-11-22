@@ -1,0 +1,63 @@
+name: Read-only stock Lidarr download-client observer
+
+# Proves an additive plugin can resolve the configured client factory and
+# CDH configuration in a REAL ephemeral stock host. Never imports, never polls
+# a configured external client and never mounts/downloads real media.
+on:
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Lidarr.ObserverProbe/**'
+      - 'tools/experiments/run_disposable_observer.py'
+      - '.github/workflows/disposable-observer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observer-only-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Retrieve pinned stock Lidarr 3.1.6.5079
+        id: host
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            --output "$archive" \
+            "https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz"
+          printf '%s  %s\n' 'fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc' "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/crescendarr-stock-observer-host"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/crescendarr-stock-observer-host"
+          core="$(find "${RUNNER_TEMP}/crescendarr-stock-observer-host" -name Lidarr.Core.dll -type f -print -quit)"
+          test -n "$core"
+          bin="$(dirname "$core")"
+          test -f "$bin/Lidarr"
+          test -f "$bin/Lidarr.Common.dll"
+          test -f "$bin/NLog.dll"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: Compile non-installable, read-only observer plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build src/Crescendarr.Lidarr.ObserverProbe/Crescendarr.Lidarr.ObserverProbe.csproj \
+            -c Release --nologo \
+            --output "${RUNNER_TEMP}/crescendarr-observer-probe" \
+            -p:CrescendarrDisposableHostBuild=true \
+            -p:LidarrBinDir="${{ steps.host.outputs.bin }}"
+      - name: Boot fresh Lidarr and verify observer without overrides
+        shell: bash
+        env:
+          CI: "true"
+        run: |
+          set -euo pipefail
+          python3 tools/experiments/run_disposable_observer.py \
+            "${{ steps.host.outputs.bin }}" \
+            "${RUNNER_TEMP}/crescendarr-observer-probe/Lidarr.Plugin.Crescendarr.ObserverProbe.dll"
+          echo "Read-only plugin resolved stock client factory and CDH setting; zero actual providers/imports." >> "$GITHUB_STEP_SUMMARY"
