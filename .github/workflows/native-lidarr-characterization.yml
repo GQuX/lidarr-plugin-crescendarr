@@ -38,8 +38,9 @@ jobs:
           set -euo pipefail
           actual="$(git -C upstream-lidarr rev-parse HEAD)"
           test "$actual" = "da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd"
-          cp crescendarr/tests/LidarrNative/CrescendarrAlbumUpgradeCharacterizationFixture.cs \
-            upstream-lidarr/src/NzbDrone.Core.Test/MediaFiles/CrescendarrAlbumUpgradeCharacterizationFixture.cs
+          # Only our original characterization files are copied to this throwaway tree.
+          cp crescendarr/tests/LidarrNative/Crescendarr*CharacterizationFixture.cs \
+            upstream-lidarr/src/NzbDrone.Core.Test/MediaFiles/
           # Upstream Core.Test relies on a platform assembly loaded via Assembly.Load
           # in AutoMoqer. An isolated test-project-only build does not stage it.
           # Add the normal Linux platform project only in this throwaway checkout.
@@ -57,8 +58,8 @@ jobs:
           set -euo pipefail
           dotnet test upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj \
             --configuration Debug \
-            --filter 'FullyQualifiedName~CrescendarrAlbumUpgradeCharacterizationFixture' \
+            --filter 'FullyQualifiedName~Crescendarr' \
             --logger 'console;verbosity=normal' \
             -p:EnableAnalyzers=false \
             -p:NuGetAudit=false
-          echo "Native importer characterization PASSED in a clean source checkout" >> "$GITHUB_STEP_SUMMARY"
+          echo "Native importer and upgrader fault characterization PASSED in a clean source checkout" >> "$GITHUB_STEP_SUMMARY"
