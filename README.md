@@ -73,6 +73,12 @@ This is **not** the full native 12-track importer with actual disk mover. The fi
 
 **Not yet playable-audio or production evidence:** the combined importer uses opaque synthetic media bytes and a mocked audio tag reader/writer, with controlled filename/root policy, a mocked event aggregator and one monitored release. Full multi-release identification, crash-safe plugin journaling, concurrent stock rescans and SMB durability remain unproven.
 
+## Source-proven two-edition import hazard
+
+[Native two-edition SQLite characterization](docs/compatibility/native-two-edition-sqlite-import.md) proves stock Lidarr **switches the monitored MusicBrainz release** if approved incoming tracks reference an alternate release, even when called with `replaceExisting:false`. Two new cases run the real 12-track importer + stock local disk mover + SQLite; the selected release stays selected only when incoming release IDs already match. [CI: 45/45 native plus both separate-process recovery phases passed](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45049081859).
+
+**Executor invariant:** before any native import or file changes, verify the selected monitored release ID from the host against every incoming release; block the whole plan on mismatch. The pure planner checks IDs, but no write-capable host adapter or crash-safe journal exists yet.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
