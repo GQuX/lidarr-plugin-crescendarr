@@ -16,6 +16,7 @@ using NzbDrone.Core.Organizer;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.RootFolders;
 using NzbDrone.Core.Test.Framework;
+using NzbDrone.Mono.Disk;
 using NzbDrone.Test.Common.AutoMoq;
 
 namespace NzbDrone.Core.Test.MediaFiles
@@ -56,6 +57,11 @@ namespace NzbDrone.Core.Test.MediaFiles
             // Explicitly opt into the upstream harness's REAL platform disk
             // provider; unlike all prior Crescendarr byte-transfer callbacks,
             // these calls execute stock DiskTransferService and stock recycler.
+            // The test harness auto-mocks Mono's ancillary mount and link
+            // providers by default, producing spurious warnings and an empty
+            // mount path. Use their unmodified real implementations too.
+            Mocker.SetConstant<IProcMountProvider>(Mocker.Resolve<ProcMountProvider>());
+            Mocker.SetConstant<ISymbolicLinkResolver>(Mocker.Resolve<SymbolicLinkResolver>());
             var physicalDisk = Mocker.Resolve<IDiskProvider>(FileSystemType.Actual);
             Mocker.SetConstant<IDiskProvider>(physicalDisk);
             var nativeTransfer = Mocker.Resolve<DiskTransferService>();
