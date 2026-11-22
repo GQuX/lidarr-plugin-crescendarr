@@ -8,6 +8,7 @@ or compromised host configuration. Requires PyYAML in the developer environment.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 import sys
 from typing import Any
@@ -18,6 +19,9 @@ except ImportError as exc:
     raise SystemExit("PyYAML is required for development validation: python -m pip install pyyaml") from exc
 
 EXPECTED_IMAGE = "lscr.io/linuxserver/lidarr:latest"
+# Accept only the stock stable LinuxServer image or a pinned immutable digest.
+# A digest is preferable for reproducible host experiments; validate its provenance separately.
+PINNED_IMAGE = re.compile(r"^lscr\.io/linuxserver/lidarr@sha256:[0-9a-f]{64}$")
 EXPECTED_SERVICE = "crescendarr-lidarr-lab"
 EXPECTED_VOLUME = "crescendarr_lidarr_lab_config"
 EXPECTED_CONTAINER = "crescendarr-lidarr-lab"
@@ -51,8 +55,9 @@ def check_compose(document: Any) -> list[str]:
     extra = set(service) - permitted
     if extra:
         errors.append("Forbidden/unreviewed service keys: " + ", ".join(sorted(extra)))
-    if service.get("image") != EXPECTED_IMAGE:
-        errors.append("Expected the official LinuxServer stable image")
+    image = service.get("image")
+    if not isinstance(image, str) or (image != EXPECTED_IMAGE and not PINNED_IMAGE.fullmatch(image)):
+        errors.append("Expected official LinuxServer stable image or a pinned sha256 digest")
     if service.get("container_name") != EXPECTED_CONTAINER:
         errors.append("Lab must have its own container name")
     if service.get("restart") != "unless-stopped":
@@ -80,8 +85,8 @@ def check_compose(document: Any) -> list[str]:
         errors.append("Exactly one test WebUI port publication is required")
     else:
         port = ports[0]
-        if not isinstance(port, str) or port != f"{EXPECTED_PUBLISHED_PORT}:{EXPECTED_TARGET_PORT}":
-            errors.append("Only the dedicated 8687:8686 test port mapping is allowed")
+        if not isinstance(port, str) or port != f"127.0.0.1:{EXPECTED_PUBLISHED_PORT}:{EXPECTED_TARGET_PORT}":
+            errors.append("Only loopback-only 127.0.0.1:8687:8686 test port mapping is allowed")
     return errors
 
 
@@ -100,7 +105,7 @@ def main() -> int:
         for error in errors:
             print(f"FAIL: {error}", file=sys.stderr)
         return 1
-    print("PASS: example uses isolated container name, new config volume, WebUI 8687, and no production bind mounts")
+    print("PASS: example uses isolated container name, new config volume, loopback-only WebUI 8687, and no production bind mounts")
     print("NOT_PROVEN: Docker/runtime isolation, network reachability, .NET compilation, plugin load, or import safety")
     return 0
 

@@ -1,5 +1,6 @@
 # Disposable Crescendarr host for testing plugin discovery and import interception.
 # Not for production. Creates a fresh Lidarr database in a dedicated Docker named volume.
+# Binds the WebUI to host loopback only; remote access requires an SSH tunnel.
 # Deliberately DOES NOT mount /music, /downloads, NAS, Docker socket, or production /config.
 services:
   crescendarr-lidarr-lab:
@@ -12,7 +13,7 @@ services:
     volumes:
       - crescendarr_lidarr_lab_config:/config
     ports:
-      - "8687:8686"
+      - "127.0.0.1:8687:8686"
     restart: unless-stopped
     labels:
       com.centurylinklabs.watchtower.enable: "false"

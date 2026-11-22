@@ -5,6 +5,12 @@
 > **DEVELOPMENT SOURCE ONLY. NOT INSTALLABLE. NOT SAFE FOR PRODUCTION.**
 > The plugin integration seam, import lifecycle, recovery and `.lrc` preservation have **not** been proven in a running Lidarr host.
 
+## Architecture safety decision (2026-11-22)
+
+An independent review, followed by [Lidarr source verification](docs/reviews/2026-11-22-independent-review-triage.md), found a destructive mismatch: stock Lidarr can delete an entire album before selective imports, recycle/delete linked extras, and retry without plugins after some startup failures.
+
+**Do not pursue IDownloadedTracksImportService as a write-enabled release mechanism.** The current probe characterizes disposable-host dependency injection only. Priority is [native import characterization (#6)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/6), [completion/lyrics/recovery (#7)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/7), and upstream compatibility with [PR #6166](https://github.com/Lidarr/Lidarr/pull/6166). The single-plugin goal is conditional on a safe host integration point.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
@@ -13,9 +19,9 @@ The current source is **only**:
 
 - `src/Crescendarr.Core/`: pure deterministic merge planner. No Lidarr references, no disk/database/network access, and no file-write operations.
 - `tests/Crescendarr.Core.Spec/`: standalone executable specifications using synthetic identities and a **fake** quality policy. They do not validate Lidarr's real quality profiles.
-- `src/Crescendarr.Lidarr.Probe/`: deliberately non-delegating, test-only registration experiment. It has **no installer, no release workflow** and must not be put into production Lidarr. A **compile-only** CI run now verifies its ABI references against an upstream binary release; this does not load or execute the adapter.
+- `src/Crescendarr.Lidarr.Probe/`: deliberately non-delegating, test-only registration experiment. It has **no installer, no release workflow** and must not be put into production Lidarr. CI has compiled and loaded this probe in a disposable host; the probe has never processed a real download. The outer import-service override is not a release design.
 - `deploy/portainer/disposable-lidarr-stable.compose.yml`: no-production-mount disposable host example (separate `/config`, port 8687); this does **not** install the probe.
-- `tools/check_disposable_compose.py` and `tools/tests/`: development-only Compose lint plus 16 regression checks for unsafe configuration.
+- `tools/check_disposable_compose.py` and `tools/tests/`: development-only Compose lint with synthetic safety regression checks, including image-digest support and a loopback-only WebUI. These cannot prove network isolation.
 - `docs/`: pinned compatibility hypotheses, safety boundaries, Portainer guide, experiment protocol and report template.
 
 No import execution, queue completion, or recovery implementation exists yet.
@@ -46,7 +52,7 @@ No NuGet test framework dependency is needed. **GitHub Actions compiled and exec
 
 Read [disposable host protocol](docs/safety/disposable-host.md). The test-only probe requires exact disposable-host opt-in, a sentinel file and an explicit synthetic-root allowlist. It intentionally returns empty import decisions, which may cause *Lidarr's own* queue/import state to change. Use it only in an isolated host with a fresh disposable DB and no real downloads.
 
-The [first disposable runtime test](docs/compatibility/disposable-runtime-evidence.md) showed the test-only service selected and a synthetic `ProcessPath` intercepted. **This is not a supported API nor proof of safe automatic imports.** The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0143ede18135fe` is not an endorsed plugin interception API. We must prove type selection, startup, original concrete resolution and unload before designing a write-enabled plugin. A DI wrapper alone would **not** solve completion/edition/lyrics safety.
+The [first disposable runtime test](docs/compatibility/disposable-runtime-evidence.md) showed the test-only service selected and its own startup handler directly calling a synthetic `ProcessPath`. **That is not a real Lidarr download/import caller.** **This is not a supported API nor proof of safe automatic imports.** The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0143ede18135fe` is not an endorsed plugin interception API. We must prove type selection, startup, original concrete resolution and unload before designing a write-enabled plugin. A DI wrapper alone would **not** solve completion/edition/lyrics safety.
 
 ## Documentation
 
@@ -60,11 +66,12 @@ The [first disposable runtime test](docs/compatibility/disposable-runtime-eviden
 - [x] Name and dependency boundary agreed
 - [x] Initial pure domain/planner and synthetic specs authored
 - [x] Experimental host-probe source authored
-- [x] Disposable Portainer example, lint and 16 Python safety regression tests (passed in authoring environment)
+- [x] Disposable Portainer example and digest-aware, loopback-only configuration lint (synthetic checks, not host isolation)
 - [x] .NET 8 pure-core compile and 29/29 synthetic specs passed in [GitHub Actions](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45018712104)
 - [x] Test-only adapter compiled against checksum-pinned Lidarr 3.1.6.5079 Linux binaries ([compile-only CI](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45019459665))
 - [x] Disposable Lidarr v3.1.6.5079 host selected the test-only importer and intercepted a synthetic call ([CI evidence](docs/compatibility/disposable-runtime-evidence.md))
-- [ ] Actual download lifecycle, no-improvement and partial-upgrade settlement, clean uninstall/fallback, unsupported-version behavior
+- [x] Isolated baseline, missing opt-in, and positive synthetic-interception tests ([CI #45020330835](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45020330835))
+- [ ] Real import caller, no-improvement and partial-upgrade settlement, clean unload/fallback, unsupported-version and multi-plugin behavior
 - [ ] Supported pre-import contract with truthful zero/partial/full outcomes
 - [ ] Verified `.lrc` preservation, edition lock and recoverable SMB-safe upgrades
 - [ ] Build a real installable plugin
@@ -80,7 +87,7 @@ Use **a new Portainer stack**, not the production multi-service stack. The lab C
 Lidarr stable v3.1.6.5079 has plugin loading in its tagged source and targets net8.0.
 This source now targets .NET 8. Production Lidarr is a **compatibility reference only**.
 The operator confirmed an independent backup and Watchtower exclusion; **no probe may be installed**
-on that live container. The pure .NET 8 planner compiled and passed 29/29 synthetic specifications in GitHub Actions. The test-only host interception probe now **compiles** against the checksum-pinned stable Lidarr release; runtime loading, DI selection, and safety behavior remain untested.
+on that live container. The pure .NET 8 planner compiled and passed 29/29 synthetic specifications in GitHub Actions. The test-only host probe compiled and loaded in a clean disposable Lidarr runtime; **real tracked download processing and all file/queue/lyrics/recovery safety remain untested**.
 Full input snapshot hashing is now included in merge plan identifiers, but these fingerprints
 are advisory: only a host-owned revalidation and recoverable import executor can authorize writes.
 
@@ -92,4 +99,4 @@ are advisory: only a host-owned revalidation and recoverable import executor can
 
 ## Disposable runtime milestone (2026-11-22)
 
-[GitHub Actions #45020067092](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45020067092) started stock Lidarr v3.1.6.5079 with a new empty database and our guarded probe, confirmed DryIoc chose the Crescendarr service, resolved Lidarr's concrete original without recursion, and intercepted exactly one synthetic test method call. **No real download-client job, import, replacement, .lrc sidecar, or crash recovery was tested.** [Evidence and limitations](docs/compatibility/disposable-runtime-evidence.md).
+[GitHub Actions #45020067092](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45020067092) started stock Lidarr v3.1.6.5079 with a new empty database and our guarded probe, confirmed DryIoc chose the Crescendarr service, resolved Lidarr's concrete original without recursion, and intercepted a synthetic method call made directly by the plugin's own startup handler, not by Lidarr's real download pipeline. **No real download-client job, import, replacement, .lrc sidecar, or crash recovery was tested.** [Evidence and limitations](docs/compatibility/disposable-runtime-evidence.md).
