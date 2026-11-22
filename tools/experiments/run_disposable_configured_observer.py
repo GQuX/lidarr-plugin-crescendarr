@@ -150,10 +150,10 @@ def main() -> int:
                 })
                 matched = set()
                 for field in blackhole["fields"]:
-                    if field["name"] == "NzbFolder":
+                    if field["name"].lower() == "nzbfolder":
                         field["value"] = str(incoming)
                         matched.add("NzbFolder")
-                    elif field["name"] == "WatchFolder":
+                    elif field["name"].lower() == "watchfolder":
                         field["value"] = str(watch)
                         matched.add("WatchFolder")
                 assert matched == {"NzbFolder", "WatchFolder"}, f"Unexpected blackhole schema: {matched}"
