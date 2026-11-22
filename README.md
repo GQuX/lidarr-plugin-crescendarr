@@ -61,6 +61,12 @@ This is **not a full Lidarr rescan or event-dispatch test**. The event handler i
 
 **Limited test scope:** the fixture explicitly wires these two subscribers and a test-controlled recycler. It is not the complete host event graph, native disk transfer, true startup rescan, or a production-safe import executor.
 
+## Real local stock filesystem mover and recycling
+
+[Source-pinned filesystem test](docs/compatibility/native-real-local-file-transfer.md) now runs stock **TrackFileMovingService**, **RecycleBinProvider**, **DiskTransferService**, the actual Linux disk provider, mount discovery and symlink resolution on disposable, valid 16-bit mono PCM WAV samples. Original audio is retained in the test recycler; the staged upgrade moves into place without affecting an unrelated better original or adjacent .lrc; a still-occupied destination rejects the move with no clobber. [CI: 42/42 native plus both cross-process recovery stages passed](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45042406597).
+
+This is **not** the full native 12-track importer with actual disk mover. The fixture controls filename policy and peripheral host services; real tags/MP3/FLAC, simultaneous rescans and CIFS/SMB behavior are not proven. Crescendarr has no production-ready write-enabled plugin.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
