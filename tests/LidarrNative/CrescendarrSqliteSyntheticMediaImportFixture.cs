@@ -25,6 +25,7 @@ using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Profiles.Qualities;
 using NzbDrone.Core.Qualities;
 using NzbDrone.Core.Test.Framework;
+using NzbDrone.Test.Common;
 
 namespace NzbDrone.Core.Test.MediaFiles
 {
@@ -34,8 +35,9 @@ namespace NzbDrone.Core.Test.MediaFiles
         private const int Total = 12;
         private const int Upgrades = 11;
 
-        [Test]
-        public void native_selective_import_relinks_real_sqlite_and_preserves_protected_bytes_and_lyrics()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void native_selective_import_relinks_real_sqlite_and_preserves_protected_bytes_and_lyrics(bool failAtSix)
         {
             var temp = Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m12-disposable");
             var library = Path.Combine(temp, "library", "synthetic-artist", "synthetic-album");
@@ -216,6 +218,13 @@ namespace NzbDrone.Core.Test.MediaFiles
                 .Returns((TrackFile file, LocalTrack local) =>
                 {
                     var trackNumber = local.Tracks.Single().AbsoluteTrackNumber;
+                    // The sixth original has already been recycled and its native SQLite
+                    // TrackFile row deleted. Inject failure before moving incoming bytes.
+                    if (failAtSix && trackNumber == 6)
+                    {
+                        throw new IOException("SYNTHETIC: sixth file transfer failed after native old-row deletion");
+                    }
+
                     var destination = physicalPaths[trackNumber];
                     File.Move(file.Path, destination);
                     file.Path = destination;
@@ -238,9 +247,70 @@ namespace NzbDrone.Core.Test.MediaFiles
 
             var importer = Mocker.Resolve<ImportApprovedTracks>();
             var results = importer.Import(decisions, false, importMode: ImportMode.Move);
+            if (failAtSix)
+            {
+                // Stock importer catches the synthetic IOException, logs a warning,
+                // and continues processing later files.
+                ExceptionVerification.ExpectedWarns(1);
+            }
 
-            Assert.That(results.Count(x => x.Result == ImportResultType.Imported), Is.EqualTo(Upgrades));
+            Assert.That(results.Count(x => x.Result == ImportResultType.Imported),
+                Is.EqualTo(failAtSix ? Upgrades - 1 : Upgrades));
+            Assert.That(results.Count(x => x.Result == ImportResultType.Skipped),
+                Is.EqualTo(failAtSix ? 1 : 0));
             Assert.That(results.Count(x => x.Result == ImportResultType.Rejected), Is.EqualTo(1));
+            Assert.That(Db.All<TrackFile>().Count, Is.EqualTo(failAtSix ? Total - 1 : Total));
+
+            if (failAtSix)
+            {
+                // Exercise the unsafe intermediate state against *real* SQLite/bytes:
+                // the old file was recycled and its TrackFile row is gone, while the
+                // incoming sixth file is still in staging and lyrics were DB-unlinked.
+                var orphan = Db.All<Track>().Single(x => x.AbsoluteTrackNumber == 6);
+                Assert.That(orphan.TrackFileId, Is.EqualTo(previous[6].Id));
+                Assert.That(Db.All<TrackFile>().Any(x => x.Id == orphan.TrackFileId), Is.False);
+                Assert.That(File.Exists(physicalPaths[6]), Is.False);
+                Assert.That(File.Exists(Path.Combine(staging, "06-synthetic.mp3")), Is.True);
+                Assert.That(File.ReadAllBytes(Path.Combine(recycle, Path.GetFileName(physicalPaths[6]))),
+                    Is.EqualTo(oldBytes[6]));
+                Assert.That(Db.All<LyricFile>().Any(x => x.TrackFileId == previous[6].Id), Is.False);
+                Assert.That(File.ReadAllBytes(lyricPaths[6]), Is.EqualTo(lyricBytes[6]));
+
+                // In-process TEST RECOVERY, not an implemented Crescendarr journal:
+                // copy from a separately verified operation-owned backup, then insert
+                // a fresh native TrackFile and repair the native Track association.
+                File.Copy(Path.Combine(backups, Path.GetFileName(physicalPaths[6])),
+                    physicalPaths[6], overwrite: false);
+                Assert.That(File.ReadAllBytes(physicalPaths[6]), Is.EqualTo(oldBytes[6]));
+
+                var restored = new TrackFile
+                {
+                    Path = physicalPaths[6],
+                    AlbumId = album.Id,
+                    Size = oldBytes[6].LongLength,
+                    Modified = File.GetLastWriteTimeUtc(physicalPaths[6]),
+                    DateAdded = DateTime.UtcNow,
+                    Quality = new QualityModel(Quality.MP3_192)
+                };
+                Mocker.Resolve<IMediaFileService>().Add(restored);
+                orphan.TrackFileId = restored.Id;
+                Mocker.Resolve<ITrackService>().SetFileIds(new List<Track> { orphan });
+                lyrics.Upsert(new LyricFile
+                {
+                    Id = 0,
+                    ArtistId = artist.Id,
+                    AlbumId = album.Id,
+                    TrackFileId = restored.Id,
+                    RelativePath = Path.Combine("synthetic-album", "06-synthetic.lrc"),
+                    Extension = ".lrc"
+                });
+
+                Assert.That(Db.All<Track>().Single(x => x.Id == orphan.Id).TrackFileId,
+                    Is.EqualTo(restored.Id));
+                Assert.That(Db.All<LyricFile>().Any(x => x.TrackFileId == restored.Id), Is.True);
+                Assert.That(restored.Id, Is.Not.EqualTo(previous[6].Id));
+            }
+
             Assert.That(Db.All<TrackFile>().Count, Is.EqualTo(Total));
 
             var storedTracks = Db.All<Track>().ToDictionary(x => x.AbsoluteTrackNumber);
@@ -250,7 +320,18 @@ namespace NzbDrone.Core.Test.MediaFiles
                 Assert.That(File.ReadAllBytes(lyricPaths[i]), Is.EqualTo(lyricBytes[i]));
                 Assert.That(File.ReadAllBytes(Path.Combine(backups, Path.GetFileName(physicalPaths[i]))),
                     Is.EqualTo(oldBytes[i]));
-                if (i == Total)
+                if (failAtSix && i == 6)
+                {
+                    // Sixth track was restored, not upgraded.
+                    Assert.That(File.ReadAllBytes(physicalPaths[i]), Is.EqualTo(oldBytes[i]));
+                    Assert.That(storedTracks[i].TrackFileId, Is.Not.EqualTo(previous[i].Id));
+                    Assert.That(storedFiles.ContainsKey(previous[i].Id), Is.False);
+                    Assert.That(storedFiles.ContainsKey(storedTracks[i].TrackFileId), Is.True);
+                    Assert.That(Db.All<LyricFile>().Single(x => x.TrackFileId == storedTracks[i].TrackFileId).Id,
+                        Is.GreaterThan(0));
+                    Assert.That(File.Exists(Path.Combine(staging, "06-synthetic.mp3")), Is.True);
+                }
+                else if (i == Total)
                 {
                     Assert.That(File.ReadAllBytes(physicalPaths[i]), Is.EqualTo(oldBytes[i]));
                     Assert.That(storedTracks[i].TrackFileId, Is.EqualTo(previous[i].Id));
