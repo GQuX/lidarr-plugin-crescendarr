@@ -124,8 +124,11 @@ namespace NzbDrone.Core.Test.MediaFiles
                 var protectedLyric = w.LyricPaths[Total];
                 Assert.That(Path.GetFileName(protectedLyric), Is.EqualTo("12 - Synthetic Track 12.lrc"));
                 var parsed = NzbDrone.Core.Parser.Parser.ParseMusicPath(protectedLyric);
-                Log($"M14_TAGGED_CONVENTIONAL_LYRIC parsed={(parsed != null)} " +
-                    $"trackNumbers=[{string.Join(",", parsed?.TrackNumbers ?? Array.Empty<int>())}] filename={Path.GetFileName(protectedLyric)}");
+                var filenameParse = NzbDrone.Core.Parser.Parser.ParseMusicTitle(Path.GetFileName(protectedLyric));
+                Log($"M14_TAGGED_CONVENTIONAL_LYRIC pathParsed={(parsed != null)} " +
+                    $"pathTrackNumbers=[{string.Join(",", parsed?.TrackNumbers ?? Array.Empty<int>())}] " +
+                    $"filenameTrackNumbers=[{string.Join(",", filenameParse?.TrackNumbers ?? Array.Empty<int>())}] " +
+                    $"filename={Path.GetFileName(protectedLyric)}");
                 var namedLyricScan = RunRealScan(w, recorder, "conventional-protected-lyric");
                 AssertStockFullAlbumRescanCascade(w, namedLyricScan, scenario);
                 Assert.That(File.Exists(protectedLyric), Is.False,
@@ -574,10 +577,15 @@ namespace NzbDrone.Core.Test.MediaFiles
                         ArtistId = w.Artist.Id,
                         AlbumId = w.Album.Id,
                         TrackFileId = old.Id,
-                        RelativePath = Path.Combine("synthetic-album", stem + ".lrc"),
+                        RelativePath = Path.Combine("synthetic-album", Path.GetFileName(w.LyricPaths[i])),
                         Extension = ".lrc"
                     });
-                    w.LyricIds[i] = Db.All<LyricFile>().Single(x => x.TrackFileId == old.Id).Id;
+                    var registeredLyric = Db.All<LyricFile>().Single(x => x.TrackFileId == old.Id);
+                    // The registered host-relative path must name the actual physical lyric
+                    // in EVERY fixture variant, including the conventional-name control.
+                    Assert.That(Path.GetFullPath(Path.Combine(w.Artist.Path, registeredLyric.RelativePath)),
+                        Is.EqualTo(w.LyricPaths[i]), $"track {i}: test lyric binding points at a decoy path");
+                    w.LyricIds[i] = registeredLyric.Id;
                 }
             }
 
