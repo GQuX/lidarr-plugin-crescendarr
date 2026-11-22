@@ -1,0 +1,55 @@
+name: Read-only download inventory specs
+
+# Pure, dependency-free C# specifications for the M10 completed-download inventory.
+# No Lidarr host, downloader, network service, filesystem fixture or database is used.
+on:
+  push:
+    paths:
+      - 'src/Crescendarr.Core/**'
+      - 'tests/Crescendarr.Core.Inventory.Spec/**'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - '.github/workflows/inventory.yml'
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Core/**'
+      - 'tests/Crescendarr.Core.Inventory.Spec/**'
+      - 'Directory.Build.props'
+      - 'global.json'
+      - '.github/workflows/inventory.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory-specs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Advisory check - inventory code stays pure (no host types, I/O, clock or network)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=src/Crescendarr.Core/Inventory
+          # Advisory only: a regex cannot prove purity, it catches obvious accidents.
+          if grep -nE '^\s*using\s+(NzbDrone|Lidarr|System\.IO|System\.Net|Microsoft\.Data|System\.Data|System\.Diagnostics)' "$dir"/*.cs; then
+            echo "Inventory code imports a host, I/O, network, process or database namespace" >&2; exit 1
+          fi
+          if grep -nE '\b(File|Directory|DriveInfo|FileSystemWatcher|Environment|Console|Process|HttpClient|Socket)\s*\.|new\s+(FileStream|StreamWriter|StreamReader|HttpClient)\b|DateTime(Offset)?\.(Now|UtcNow)|Random\b' "$dir"/*.cs; then
+            echo "Inventory code references storage, environment, process, network, wall clock or randomness" >&2; exit 1
+          fi
+          if grep -rnP '[^\x00-\x7F]' "$dir" tests/Crescendarr.Core.Inventory.Spec --include=*.cs; then
+            echo "Non-ASCII source characters (use \\u escapes so invisible characters stay reviewable)" >&2; exit 1
+          fi
+          echo "ADVISORY_INVENTORY_PURITY_OK (pattern check, not a proof)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run inventory specifications
+        run: dotnet run --project tests/Crescendarr.Core.Inventory.Spec/Crescendarr.Core.Inventory.Spec.csproj --configuration Release
+      - name: Run existing planner specifications against the same core build
+        run: dotnet run --project tests/Crescendarr.Core.Spec/Crescendarr.Core.Spec.csproj --configuration Release
