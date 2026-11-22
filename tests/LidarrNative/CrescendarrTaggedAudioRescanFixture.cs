@@ -424,6 +424,19 @@ namespace NzbDrone.Core.Test.MediaFiles
             Mocker.SetConstant<ITrackService>(w.TrackService);
             Mocker.SetConstant<IReleaseService>(Mocker.Resolve<ReleaseService>());
 
+            // Real disk, mount, symlink and recycle services FIRST, so every stock service built
+            // afterwards (including the lyric deletion handler) sees the actual filesystem. An earlier
+            // evidence run built LyricFileService before this point; its mocked FileExists returned
+            // false and hid whether stock recycles physical lyrics.
+            Mocker.SetConstant<IProcMountProvider>(Mocker.Resolve<ProcMountProvider>());
+            Mocker.SetConstant<ISymbolicLinkResolver>(Mocker.Resolve<SymbolicLinkResolver>());
+            Mocker.SetConstant<IDiskProvider>(Mocker.Resolve<IDiskProvider>(FileSystemType.Actual));
+            Mocker.GetMock<IConfigService>().SetupGet(x => x.RecycleBin).Returns(w.Recycle);
+            Mocker.SetConstant<IRecycleBinProvider>(Mocker.Resolve<RecycleBinProvider>());
+            w.Lyrics = Mocker.Resolve<LyricFileService>();
+            Mocker.SetConstant<IExtraFileService<LyricFile>>(w.Lyrics);
+            Assert.That(Db.All<LyricFile>().Count, Is.GreaterThan(0), "lyric rows were registered before wiring");
+
             // Real synchronous stock deletion subscribers, registered BEFORE the importer runs.
             Mocker.GetMock<IServiceFactory>().Setup(x => x.BuildAll<IHandle<TrackFileDeletedEvent>>())
                 .Returns(new List<IHandle<TrackFileDeletedEvent>> { w.TrackService, w.Lyrics });
@@ -432,17 +445,12 @@ namespace NzbDrone.Core.Test.MediaFiles
             w.MediaFiles = new MediaFileService(Mocker.Resolve<IMediaFileRepository>(), w.Bus, LogManager.GetLogger("CrescendarrM14Tagged"));
             Mocker.SetConstant<IMediaFileService>(w.MediaFiles);
 
-            Mocker.SetConstant<IProcMountProvider>(Mocker.Resolve<ProcMountProvider>());
-            Mocker.SetConstant<ISymbolicLinkResolver>(Mocker.Resolve<SymbolicLinkResolver>());
-            Mocker.SetConstant<IDiskProvider>(Mocker.Resolve<IDiskProvider>(FileSystemType.Actual));
             w.NativeTransfer = Mocker.Resolve<DiskTransferService>();
             Mocker.GetMock<IDiskTransferService>()
                 .Setup(x => x.TransferFile(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<TransferMode>(), It.IsAny<bool>()))
                 .Returns((string s, string d, TransferMode m, bool o) =>
                     w.TransferHook != null ? w.TransferHook(s, d, m, o) : w.NativeTransfer.TransferFile(s, d, m, o));
 
-            Mocker.GetMock<IConfigService>().SetupGet(x => x.RecycleBin).Returns(w.Recycle);
-            Mocker.SetConstant<IRecycleBinProvider>(Mocker.Resolve<RecycleBinProvider>());
             Mocker.GetMock<IBuildFileNames>()
                 .Setup(x => x.BuildTrackFilePath(It.IsAny<List<Track>>(), It.IsAny<Artist>(), It.IsAny<Album>(),
                     It.IsAny<TrackFile>(), It.IsAny<string>(), It.IsAny<NamingConfig>(), It.IsAny<List<CustomFormat>>()))
