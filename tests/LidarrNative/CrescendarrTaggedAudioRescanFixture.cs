@@ -98,14 +98,14 @@ namespace NzbDrone.Core.Test.MediaFiles
                 var originalLinks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber, t => t.TrackFileId);
                 var originalRows = Db.All<TrackFile>().Select(f => f.Id).OrderBy(id => id).ToArray();
                 var originalLyrics = Db.All<LyricFile>().ToDictionary(l => l.Id, l => l.TrackFileId);
-                var scan = RunRealScan(w, recorder, "fully-linked-baseline");
+                var baselineScan = RunRealScan(w, recorder, "fully-linked-baseline");
                 var finalLinks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber, t => t.TrackFileId);
                 var finalRows = Db.All<TrackFile>().Select(f => f.Id).OrderBy(id => id).ToArray();
                 var finalLyrics = Db.All<LyricFile>().ToDictionary(l => l.Id, l => l.TrackFileId);
                 var linksChanged = originalLinks.Any(p => !finalLinks.TryGetValue(p.Key, out var id) || id != p.Value);
                 var lyricLinksChanged = originalLyrics.Count != finalLyrics.Count ||
                     originalLyrics.Any(p => !finalLyrics.TryGetValue(p.Key, out var id) || id != p.Value);
-                Log($"M14_TAGGED_CLEAN_BASELINE decisions={scan.Decisions.Count} approved={scan.Decisions.Count(d => d.Approved)} " +
+                Log($"M14_TAGGED_CLEAN_BASELINE decisions={baselineScan.Decisions.Count} approved={baselineScan.Decisions.Count(d => d.Approved)} " +
                     $"linksChanged={linksChanged} rowIdsChanged={!originalRows.SequenceEqual(finalRows)} " +
                     $"lyricRowsChanged={lyricLinksChanged}");
                 CollectInvariants(w, scenario);
@@ -126,8 +126,8 @@ namespace NzbDrone.Core.Test.MediaFiles
                 var parsed = NzbDrone.Core.Parser.Parser.ParseMusicPath(protectedLyric);
                 Log($"M14_TAGGED_CONVENTIONAL_LYRIC parsed={(parsed != null)} " +
                     $"trackNumbers=[{string.Join(",", parsed?.TrackNumbers ?? Array.Empty<int>())}] filename={Path.GetFileName(protectedLyric)}");
-                var scan = RunRealScan(w, recorder, "conventional-protected-lyric");
-                AssertStockFullAlbumRescanCascade(w, scan, scenario);
+                var namedLyricScan = RunRealScan(w, recorder, "conventional-protected-lyric");
+                AssertStockFullAlbumRescanCascade(w, namedLyricScan, scenario);
                 Assert.That(File.Exists(protectedLyric), Is.False,
                     "even a conventionally named registered lyric was physically recycled before rediscovery");
                 Assert.That(Db.All<LyricFile>(), Is.Empty,
