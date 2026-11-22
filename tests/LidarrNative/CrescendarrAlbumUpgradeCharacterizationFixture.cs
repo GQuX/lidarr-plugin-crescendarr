@@ -11,7 +11,6 @@ using Moq;
 using NLog;
 using NUnit.Framework;
 using NzbDrone.Common.Disk;
-using NzbDrone.Common.Extensions;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.Datastore;
