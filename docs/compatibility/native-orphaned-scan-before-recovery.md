@@ -3,7 +3,7 @@
 **Status: DRAFT.**
 
 - **Empty-decision controls PASSED.** Both empty-decision scans passed on Linux native CI: [45058139237](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45058139237) for the scanner-only case, and [45058579402](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45058579402) for the real-event-during-import variant, as confirmed by the independent review.
-- **Real tagged-audio scan characterized.** This uses real tag reading, identification and import decisions; see the new section below. [Issue #38](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/38). Source pinned to unmodified Lidarr v3.1.6.5079 (`da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd`). No live host, audio library, NAS/SMB or download client.
+- **Real tagged-audio scan characterized; independent controls verified.** Native CI [45065051393](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45065051393) on `2c71891` passed **65/65** native tests plus **1/1 + 1/1** independent-process stages. Planner CI [45065051407](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45065051407) also passed. This uses real tag reading, identification and import decisions; see the new section below. [Issue #38](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/38). Source pinned to unmodified Lidarr v3.1.6.5079 (`da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd`). No live host, audio library, NAS/SMB or download client.
 
 ## Safety question
 
@@ -87,14 +87,17 @@ The older empty-decision M12/M14 cases never reach a lyric-bearing deletion, so 
 - **Row identity is not stable across a stock rescan.** Every bound `TrackFile` ID can change even when no bytes changed. A journal must never treat a changed ID alone as data loss, nor rely on IDs across a scan without re-reading paths and bytes.
 - **The stock schema rejects identical duplicate paths** with `UNIQUE(TrackFiles.Path)`. M13's same-path duplicate checks remain defense in depth, and case-variant paths are still possible.
 
-### Independent review controls (in progress)
+### Independent review controls (verified in run 45065051393)
 
-Two additional tests were added following independent review of the first tagged-audio evidence:
+Following independent review, two additional source-pinned tagged-audio scenarios were run on the same migrated SQLite, disk provider, scanner, event subscribers and stock decision maker. The original four scenarios and both empty-decision controls remained unchanged.
 
-1. **Fully linked baseline:** the same scanner, real decision pipeline, 12 tagged files, registered lyrics, native event subscribers, album and quality profile, but *all 12 files already linked*. It records fresh decisions and fails the strict preservation assertions if TrackFile IDs, track links, registered lyric rows or physical lyric bytes change. This determines whether an unknown file is a necessary trigger, rather than assuming causality from the original four scenarios.
-2. **Conventional protected lyric filename:** under an otherwise identical unknown-sixth-file scan, the protected FLAC lyric uses `12 - Synthetic Track 12.lrc` rather than the synthetic short stem. The test logs `Parser.ParseMusicPath` output and checks whether the registered lyric is physically recycled and whether `ExistingLyricImporter` can re-register it. The filename control does *not* prove the parser can reconstruct a file already removed by the deletion handler.
+1. **Fully linked, no-unknown-file baseline: PASSED.** All 12 tagged audio files already had `TrackFile` rows; all 12 physical `.lrc` files were registered. The real scanner returned **zero import decisions**, changed **no track links, TrackFile row IDs, lyric DB links or physical lyric bytes**, and passed every preserved-state assertion. Log: `M14_TAGGED_CLEAN_BASELINE decisions=0 approved=0 linksChanged=False rowIdsChanged=False lyricRowsChanged=False`. This **supports unknown-file-triggered cascade causality within this fixture**. It does not imply rescans are safe with other host configurations or file states.
+2. **Conventional protected lyric filename: PASSED as an adverse characterization.** With the sixth audio file unknown, protected track 12's physical lyric and its **actual registered host-relative path** were both `12 - Synthetic Track 12.lrc`. The fixture now validates that `Artist.Path + LyricFile.RelativePath` is exactly the physical lyric path before any scan, preventing a decoy-path false result. Stock scanning still re-imported 11 previously linked tracks, physically recycled **all 11 still-registered lyrics including the protected one**, and ended with **zero lyric DB rows**. Log: `M14_TAGGED_CASCADE scenario=ConventionalProtectedLyricName relinked=11 lyricsRecycled=11 lyricRowsAfter=0`.
+   - **Parsing limitation:** the stock parser returned an object but extracted **no track number** from either `ParseMusicPath` or `ParseMusicTitle` for this filename in this fixture. Thus this proves conventional-looking naming alone did not prevent physical recycling; it **does not** rule out different valid naming and identification settings recovering a sidecar.
+   - **Rejected preliminary fixture result:** an earlier red naming test left the registered `RelativePath` pointing to the old short filename, while changing only the physical path. That did **not** test the actual registered lyric and was corrected before the successful run.
+3. **Honest labels:** `CollectInvariants` now reports each actual scenario, not `ControlUnlinkedValidFile` for all cases. Test code does not treat an intentionally characterized lyric-preservation violation as a safe outcome.
 
-These checks are **not yet CI-verified** in this revision; the original four-case run remains the latest accepted tagged-audio result. Their findings must be added here after executing the exact updated commit. Scenario-specific invariant logs now identify their actual cases rather than mislabeling every run as the control.
+The original tagged-audio scenarios pass **because their expected destructive stock behavior was reproduced and asserted**. Only the fully linked baseline asserts preservation. This is a serious unsolved plugin safety requirement, not approval for unattended writes.
 
 ### Still not proven
 
