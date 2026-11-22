@@ -25,6 +25,12 @@ The [disposable stock host test](docs/compatibility/stock-lidarr-readonly-observ
 
 **These are two separate proofs**, not a functioning plugin-managed download queue. The real host had zero configured clients; the native client had a mocked completed item. No actual audio or user downloader was accessed.
 
+## Completed job observed inside stock Lidarr with CDH OFF
+
+[The synthetic-client disposable-host test](docs/compatibility/stock-cdh-off-configured-client.md) has now confirmed an **actual in-process** read-only Crescendarr observer receiving a completed item from Lidarr's **configured built-in Usenet Blackhole client** with Completed Download Handling set to OFF via **stock local API**. The same ephemeral configuration was restarted **without the plugin**, and CDH remained OFF while the synthetic `.lrc` survived intact. [CI evidence](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45033044145).
+
+**This validates completed-job observation and a narrow uninstall fallback, not safe per-track file merging.** The test had no audio to import, no SABnzbd connection, and no real library or NAS; all file replacement, edition, lyrics/DB consistency and crash recovery remain release blockers. Do not change production Completed Download Handling or install the disposable probe.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
