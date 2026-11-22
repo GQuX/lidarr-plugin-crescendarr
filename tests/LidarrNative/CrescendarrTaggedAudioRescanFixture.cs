@@ -46,7 +46,7 @@ using NzbDrone.Test.Common.AutoMoq;
 namespace NzbDrone.Core.Test.MediaFiles
 {
     [TestFixture]
-    public class CrescendarrTaggedAudioRescanFixture : DbTest
+    public partial class CrescendarrTaggedAudioRescanFixture : DbTest
     {
         private const int Total = 12;
         private const int Upgrades = 11;
@@ -681,9 +681,9 @@ namespace NzbDrone.Core.Test.MediaFiles
             }.Write(path);
         }
 
-        private World BuildWorld(bool sixthUnlinkedFromStart, bool conventionalProtectedLyric = false)
+        private World BuildWorld(bool sixthUnlinkedFromStart, bool conventionalProtectedLyric = false, string worldRoot = null)
         {
-            var w = new World { Temp = Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m14-tagged") };
+            var w = new World { Temp = worldRoot ?? Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m14-tagged") };
             w.Library = Path.Combine(w.Temp, "library", "synthetic-artist", "synthetic-album");
             w.Staging = Path.Combine(w.Temp, "staging");
             w.Recycle = Path.Combine(w.Temp, "synthetic-recycle");
@@ -826,7 +826,7 @@ namespace NzbDrone.Core.Test.MediaFiles
 
         // ------------------------------------------------------------------ wiring
 
-        private void WireRealEventsAndStockDisk(World w)
+        private void WireRealEventsAndStockDisk(World w, bool expectRegisteredLyrics = true)
         {
             Mocker.SetConstant<IMediaFileRepository>(Mocker.Resolve<MediaFileRepository>());
             Mocker.SetConstant<ITrackRepository>(Mocker.Resolve<TrackRepository>());
@@ -849,7 +849,10 @@ namespace NzbDrone.Core.Test.MediaFiles
             w.Lyrics = new LyricFileService(Mocker.Resolve<IExtraFileRepository<LyricFile>>(), Mocker.Resolve<IArtistService>(),
                 Mocker.Resolve<IDiskProvider>(), Mocker.Resolve<IRecycleBinProvider>(), LogManager.GetLogger("CrescendarrM14Lyric"));
             Mocker.SetConstant<IExtraFileService<LyricFile>>(w.Lyrics);
-            Assert.That(Db.All<LyricFile>().Count, Is.GreaterThan(0), "lyric rows were registered before wiring");
+            if (expectRegisteredLyrics)
+            {
+                Assert.That(Db.All<LyricFile>().Count, Is.GreaterThan(0), "lyric rows were registered before wiring");
+            }
 
             // Real synchronous stock deletion subscribers, registered BEFORE the importer runs.
             Mocker.GetMock<IServiceFactory>().Setup(x => x.BuildAll<IHandle<TrackFileDeletedEvent>>())

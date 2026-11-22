@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           dotnet test upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj \
             --configuration Debug \
-            --filter '(FullyQualifiedName~Crescendarr&FullyQualifiedName!~CrescendarrProcessRestartFixture&FullyQualifiedName!~produce_sixth_file_interruption_checkpoint_for_new_process)' \
+            --filter '(FullyQualifiedName~Crescendarr&FullyQualifiedName!~CrescendarrProcessRestartFixture&FullyQualifiedName!~produce_sixth_file_interruption_checkpoint_for_new_process&FullyQualifiedName!~p0_crash_recovery)' \
             --logger 'console;verbosity=normal' \
             -p:EnableAnalyzers=false \
             -p:NuGetAudit=false
@@ -98,3 +98,48 @@ jobs:
             --logger 'console;verbosity=normal' \
             -p:EnableAnalyzers=false -p:NuGetAudit=false
           echo "Separate dotnet test processes reproduced and repaired a verified interrupted native SQLite/media snapshot. NOT a real Lidarr server restart." >> "$GITHUB_STEP_SUMMARY"
+      # P0 issue #41: album-wide lyric detachment across REAL process termination. Every step below is
+      # a separate `dotnet test` process. "killed" steps SIGKILL their own test host mid-operation; later
+      # steps reopen the SQLite main file + WAL exactly as the kill left them. Disposable runner-temp only.
+      - name: "P0 lane D1: publish all-album lyric manifest, SIGKILL mid-detach"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh detach-crash "$RUNNER_TEMP/crescendarr-p0-detach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" killed
+      - name: "P0 lane D2: new process, plugin absent, real stock tagged rescan"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh absent-scan "$RUNNER_TEMP/crescendarr-p0-detach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass
+      - name: "P0 lane D3: malformed, stale, cross-album and conflicting observations require review"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh negative "$RUNNER_TEMP/crescendarr-p0-detach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass 'FullyQualifiedName~p0_crash_recovery_negative'
+      - name: "P0 lane D4: new process recovers from fresh host IDs, physical hashes and backups"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh recover "$RUNNER_TEMP/crescendarr-p0-detach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass
+      - name: "P0 lane D5: second restart replays as a no-op, including a stock rescan"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh replay "$RUNNER_TEMP/crescendarr-p0-detach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass
+      - name: "P0 lane D6: RequiresReview stays sticky across a restart"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh review-replay "$RUNNER_TEMP/crescendarr-p0-detach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass
+      - name: "P0 lane R1: publish manifest, SIGKILL mid-detach"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh detach-crash "$RUNNER_TEMP/crescendarr-p0-reattach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" killed
+      - name: "P0 lane R2: new process starts reattachment, SIGKILL mid-reattach"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh recover-crash "$RUNNER_TEMP/crescendarr-p0-reattach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" killed
+      - name: "P0 lane R3: new process, plugin absent stock rescan, then recovery"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh absent-scan-recover "$RUNNER_TEMP/crescendarr-p0-reattach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass
+      - name: "P0 lane R4: second restart replays as a no-op, including a stock rescan"
+        shell: bash
+        run: bash crescendarr/tests/LidarrNative/p0-crash-phase.sh replay "$RUNNER_TEMP/crescendarr-p0-reattach-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" pass
+      - name: "P0 evidence: journals and kill points"
+        if: always()
+        shell: bash
+        run: |
+          for root in "$RUNNER_TEMP"/crescendarr-p0-*; do
+            [ -d "$root" ] || continue
+            echo "===== $root"
+            for f in "$root"/kill-*.evidence "$root"/journal.log "$root"/neg-*/journal.log; do
+              [ -f "$f" ] && { echo "--- $f"; cat "$f"; }
+            done
+            ls -la "$root" "$root"/crashed-db-* 2>/dev/null || true
+          done
