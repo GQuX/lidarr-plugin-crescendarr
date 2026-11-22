@@ -78,7 +78,7 @@ The older empty-decision M12/M14 cases never reach a lyric-bearing deletion, so 
 
 ### What this changes for Crescendarr (implications; none are implemented here)
 
-- **A stock rescan is destructive to every *registered* lyric in an album the moment any unknown audio file appears there.** Three things can cause that:
+- **In this source-pinned, synthetic tagged-audio fixture, a populated stock rescan with an unknown file recycled every still-registered album lyric.** This does not establish the behavior of every ordinary rescan or all daemon configurations. Three states that can expose this risk in the fixture are:
   - a partial import that leaves a placed-but-unlinked file;
   - M13's own automatic `RestoreOriginalBytes`;
   - a user dropping a file into the folder.
@@ -86,6 +86,15 @@ The older empty-decision M12/M14 cases never reach a lyric-bearing deletion, so 
 - **A stock scan can complete M13's two operator-approval repairs by itself.** It inserts a fresh row for a restored original, or for a placed incoming file. The adapter's reconciler must treat "a fresh row appeared that we did not insert" as a legitimate observation, not an inconsistency. It must still re-verify bytes and edition, and accept that every other track also received a new row ID.
 - **Row identity is not stable across a stock rescan.** Every bound `TrackFile` ID can change even when no bytes changed. A journal must never treat a changed ID alone as data loss, nor rely on IDs across a scan without re-reading paths and bytes.
 - **The stock schema rejects identical duplicate paths** with `UNIQUE(TrackFiles.Path)`. M13's same-path duplicate checks remain defense in depth, and case-variant paths are still possible.
+
+### Independent review controls (in progress)
+
+Two additional tests were added following independent review of the first tagged-audio evidence:
+
+1. **Fully linked baseline:** the same scanner, real decision pipeline, 12 tagged files, registered lyrics, native event subscribers, album and quality profile, but *all 12 files already linked*. It records fresh decisions and fails the strict preservation assertions if TrackFile IDs, track links, registered lyric rows or physical lyric bytes change. This determines whether an unknown file is a necessary trigger, rather than assuming causality from the original four scenarios.
+2. **Conventional protected lyric filename:** under an otherwise identical unknown-sixth-file scan, the protected FLAC lyric uses `12 - Synthetic Track 12.lrc` rather than the synthetic short stem. The test logs `Parser.ParseMusicPath` output and checks whether the registered lyric is physically recycled and whether `ExistingLyricImporter` can re-register it. The filename control does *not* prove the parser can reconstruct a file already removed by the deletion handler.
+
+These checks are **not yet CI-verified** in this revision; the original four-case run remains the latest accepted tagged-audio result. Their findings must be added here after executing the exact updated commit. Scenario-specific invariant logs now identify their actual cases rather than mislabeling every run as the control.
 
 ### Still not proven
 
@@ -96,12 +105,12 @@ The older empty-decision M12/M14 cases never reach a lyric-bearing deletion, so 
 
 Issue #38 should stay open, and the **production write-enabled gate stays NO-GO**.
 
-### Critical boundary and what this DOES NOT prove
+### Evidence boundaries: empty-decision versus tagged-audio tests
 
-This first increment **does not run native audio tag identification or full scan import decision-making**: the fixture's MP3/FLAC-named payloads are intentionally *opaque, non-playable* bytes. Its `IMakeImportDecision.GetImportDecisions` seam returns an empty set, allowing the **real stock scanner/cleanup/file enumeration/event plumbing** to run without fabricated media identification. `ImportApprovedTracks` itself is not replaced, but sees no decisions during scan.
+The **older two empty-decision M14 variants** use opaque synthetic media and explicitly return no scanner import decisions. Those variants prove only native enumeration, cleanup and event handling under that artificial decision outcome.
 
-Consequently, even green CI establishes only how the stock scan/cleanup path treats this already-orphaned SQLite state under an **empty-decision** scan. It does **not** establish what a normal populated rescan will do when tag readers identify files, invoke native importing, rename or retag files, or observe concurrent scan events. The real event handlers are registered, but this case may publish **no TrackFileDeletedEvent**, because the sixth TrackFile DB row was already deleted by the failed importer. Existing separate M12 event-dispatch tests prove handler behavior on a deletion that actually publishes an event. Neither evidence source is a full server boot.
+The **new tagged-audio variants**, in contrast, really execute Lidarr's own tag reader, identification, 12 import specifications, populated decisions, importer and synchronous deletion handlers on migrated runner-local SQLite. They establish the observed synthetic full-album re-import and lyric-recycle hazard, but **not** normal-daemon frequency, other event subscribers, actual audio decoding, a production race, or SMB/CIFS durability. The additional independent-review controls above are pending execution, so whether the unknown audio file is a necessary condition remains open.
 
-Follow-up under #38 must exercise actual discovered decisions with valid tagged synthetic audio or explain why that cannot be done. It must separately test a scanner with real event fan-out and a post-orphan perturbation, including interleaved rescans. A green empty-decision test must **not** close #38 or lift the production write-enabled NO-GO.
+This is **not** proof that Crescendarr can preserve sidecars during a live rescan, and it provides no authorization for a production write-enabled plugin.
 
-Everything here is disposable runner-local testing. The test does not exercise power loss, SMB/CIFS semantics, a real Lidarr daemon restart, or a working plugin.
+Everything here remains disposable runner-local testing; no user files, NAS, downloader or real Lidarr instance were accessed.
