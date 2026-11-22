@@ -2,7 +2,8 @@ name: Native Lidarr safety characterization
 
 # Loads ORIGINAL Lidarr v3.1.6.5079 source in an ephemeral runner.
 # Only copies our test fixture into temporary checkout: no upstream repo writes.
-# Includes mocked-source fixtures and a real disposable SQLite/synthetic-byte import fixture.
+# Includes mocked-source fixtures, a real disposable SQLite/synthetic-byte fixture,
+# and two separate NUnit test processes exchanging a faulted SQLite snapshot.
 # No user audio, real download clients, or production Lidarr database.
 on:
   pull_request:
@@ -59,8 +60,36 @@ jobs:
           set -euo pipefail
           dotnet test upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj \
             --configuration Debug \
-            --filter 'FullyQualifiedName~Crescendarr' \
+            --filter '(FullyQualifiedName~Crescendarr&FullyQualifiedName!~CrescendarrProcessRestartFixture&FullyQualifiedName!~produce_sixth_file_interruption_checkpoint_for_new_process)' \
             --logger 'console;verbosity=normal' \
             -p:EnableAnalyzers=false \
             -p:NuGetAudit=false
-          echo "Native import/lyric/download tests PASSED on disposable source, with mocks plus isolated SQLite and test-controlled physical byte moves" >> "$GITHUB_STEP_SUMMARY"
+          echo "Native import/lyric/download tests PASSED with disposable SQLite and test-controlled byte moves" >> "$GITHUB_STEP_SUMMARY"
+      - name: Prepare faulted stock SQLite in a separate test process
+        shell: bash
+        env:
+          CRESCENDARR_M12_PHASE: prepare
+          CRESCENDARR_M12_RESTART_ROOT: ${{ runner.temp }}/crescendarr-m12-restart-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          dotnet test upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj \
+            --configuration Debug --no-build \
+            --filter 'FullyQualifiedName~produce_sixth_file_interruption_checkpoint_for_new_process' \
+            --logger 'console;verbosity=normal' \
+            -p:EnableAnalyzers=false -p:NuGetAudit=false
+          test -f "$CRESCENDARR_M12_RESTART_ROOT/ready.marker"
+          test -f "$CRESCENDARR_M12_RESTART_ROOT/interrupted-lidarr.db"
+      - name: Reopen and repair interrupted SQLite in a new test process
+        shell: bash
+        env:
+          CRESCENDARR_M12_PHASE: recover
+          CRESCENDARR_M12_RESTART_ROOT: ${{ runner.temp }}/crescendarr-m12-restart-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test -f "$CRESCENDARR_M12_RESTART_ROOT/ready.marker"
+          dotnet test upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj \
+            --configuration Debug --no-build \
+            --filter 'FullyQualifiedName~CrescendarrProcessRestartFixture' \
+            --logger 'console;verbosity=normal' \
+            -p:EnableAnalyzers=false -p:NuGetAudit=false
+          echo "Separate dotnet test processes reproduced and repaired a verified interrupted native SQLite/media snapshot. NOT a real Lidarr server restart." >> "$GITHUB_STEP_SUMMARY"
