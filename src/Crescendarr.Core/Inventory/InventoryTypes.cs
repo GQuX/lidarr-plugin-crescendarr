@@ -86,6 +86,10 @@ public enum InventoryReason
     StockHandlingWasActive = 112,
     ClientIdentityChanged = 113,
     ClientNoLongerSupported = 114,
+    /// <summary>Returned after MissingFromClient. Same ID and path may be a different job; sticky review.</summary>
+    ReappearedAfterMissing = 115,
+    /// <summary>Returned after a shorter absence with a different title or total size.</summary>
+    ReappearedWithChangedEvidence = 116,
 
     // Item evidence that forces Ambiguous.
     DuplicateIdInPoll = 200,
@@ -93,7 +97,6 @@ public enum InventoryReason
     OutputPathCollision = 202,
 
     // Non-escalating item evidence.
-    ReappearedAfterMissing = 300,
     CompletedWithRemainingBytes = 301,
     SizeUnknown = 302,
     SizeChangedWhileCompleted = 303,
@@ -103,6 +106,8 @@ public enum InventoryReason
     StabilityResetClockRegression = 307,
     StabilityResetPollGap = 308,
     StabilityResetInvalidTimestamp = 309,
+    RemainingBytesUnknown = 310,
+    StabilityResetSequenceReset = 311,
 
     // Evaluation-time reasons (never persisted on items).
     OutputRootNoLongerAllowed = 400,
@@ -121,6 +126,8 @@ public enum InventoryReason
     StockHandlingActive = 506,
     InvalidTimestamp = 507,
     ClientPollFailed = 508,
+    /// <summary>A poll arrived with a non-increasing sequence but a newer timestamp: the adapter lost its counter.</summary>
+    SequenceReset = 509,
 }
 
 /// <summary>
@@ -212,8 +219,22 @@ public sealed record ItemRecord(
     bool EverCompleted,
     int StablePollCount,
     long? StableSinceTicks,
-    int ConsecutiveAbsences)
+    int ConsecutiveAbsences,
+    ImmutableSortedSet<string> VariantPaths)
 {
+    /// <summary>Ordinal set used for <see cref="VariantPaths"/>; never culture-sensitive.</summary>
+    public static ImmutableSortedSet<string> NoPaths { get; } = ImmutableSortedSet.Create<string>(StringComparer.Ordinal);
+
+    /// <summary>Every canonical path this record has claimed (anchored, current, conflicting variants).</summary>
+    public IEnumerable<string> ClaimedPaths()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in new[] { AnchoredPath, CurrentPath }.Concat(VariantPaths))
+        {
+            if (path is not null && seen.Add(path)) yield return path;
+        }
+    }
+
     public bool IsSticky => State is InventoryItemState.Ambiguous or InventoryItemState.RequiresReview;
 }
 

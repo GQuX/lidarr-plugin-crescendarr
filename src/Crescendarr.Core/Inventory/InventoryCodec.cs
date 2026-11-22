@@ -147,6 +147,9 @@ public static class InventoryCodec
         w.WriteNumber("stablePollCount", i.StablePollCount);
         WriteNullable(w, "stableSinceTicks", i.StableSinceTicks);
         w.WriteNumber("consecutiveAbsences", i.ConsecutiveAbsences);
+        w.WriteStartArray("variantPaths");
+        foreach (var path in i.VariantPaths) w.WriteStringValue(path);
+        w.WriteEndArray();
         w.WriteEndObject();
     }
 
@@ -211,7 +214,7 @@ public static class InventoryCodec
     {
         RequireExactProperties(e, "clientDefinitionId", "downloadId", "state", "reasons", "firstSeenTicks", "lastSeenTicks",
             "lastSeenSequence", "lastStatus", "title", "category", "currentPath", "currentRoot", "anchoredPath", "anchoredRoot",
-            "rawPathEvidence", "totalBytes", "remainingBytes", "everCompleted", "stablePollCount", "stableSinceTicks", "consecutiveAbsences");
+            "rawPathEvidence", "totalBytes", "remainingBytes", "everCompleted", "stablePollCount", "stableSinceTicks", "consecutiveAbsences", "variantPaths");
         return new ItemRecord(
             new ItemKey(ReadInt(e, "clientDefinitionId"), ReadString(e, "downloadId")),
             ReadEnum<InventoryItemState>(e.GetProperty("state")),
@@ -232,7 +235,8 @@ public static class InventoryCodec
             ReadBool(e, "everCompleted"),
             ReadInt(e, "stablePollCount"),
             ReadNullableLong(e, "stableSinceTicks"),
-            ReadInt(e, "consecutiveAbsences"));
+            ReadInt(e, "consecutiveAbsences"),
+            ReadPaths(e, "variantPaths"));
     }
 
     private static string? CheckInvariants(InventoryState state)
@@ -256,6 +260,8 @@ public static class InventoryCodec
                 return "stable item lacks stability evidence";
             if (item.IsSticky && item.Reasons.IsEmpty) return "review state without a reason";
             if (item.State == InventoryItemState.MissingFromClient && item.ConsecutiveAbsences == 0) return "missing item without absences";
+            if (!item.VariantPaths.IsEmpty && !item.IsSticky) return "variant paths on a non-review record";
+            if (item.VariantPaths.Any(p => p.Length == 0 || InventoryText.UnsafeCharacter(p) is not null)) return "unsafe variant path";
         }
 
         return null;
@@ -333,6 +339,17 @@ public static class InventoryCodec
             !Enum.IsDefined(parsed) || !string.Equals(parsed.ToString(), text, StringComparison.Ordinal))
             throw new FormatException("unknown enum name");
         return parsed;
+    }
+
+    private static ImmutableSortedSet<string> ReadPaths(JsonElement e, string name)
+    {
+        var builder = ItemRecord.NoPaths.ToBuilder();
+        foreach (var element in ReadArray(e, name))
+        {
+            if (element.ValueKind != JsonValueKind.String || !builder.Add(element.GetString()!)) throw new FormatException("invalid or duplicate variant path");
+        }
+
+        return builder.ToImmutable();
     }
 
     private static ImmutableSortedSet<InventoryReason> ReadReasons(JsonElement e, string name)

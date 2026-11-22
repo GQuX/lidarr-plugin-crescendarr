@@ -30,6 +30,7 @@ internal static class Program
             ("L04 Age without enough polls is not stable", AgeWithoutPolls),
             ("L05 Completed with remaining bytes never stabilizes", RemainingBytes),
             ("L06 Unknown or zero size never stabilizes when RequireKnownSize", UnknownSize),
+            ("L10 Unknown remaining bytes never stabilize", UnknownRemaining),
             ("L07 Size change while completed restarts stability", SizeChange),
             ("L08 Negative or inconsistent sizes require review", InvalidSizes),
             ("L09 No state or eligibility claims import, cleanup or removal", NoImportVocabulary),
@@ -43,7 +44,11 @@ internal static class Program
             ("I04 Same ID in two clients is Ambiguous in either poll order", CrossClientDuplicate),
             ("I05 Equal, case-variant or nested output paths collide", PathCollisions),
             ("I06 Reused ID with a different path after disappearance requires review", IdReuse),
-            ("I07 Reappearance with the same path must re-prove stability", Reappearance),
+            ("I07 Reappearance after Missing is sticky review even with the same path", Reappearance),
+            ("I10 Same ID and path, different title and size, across a restart: review", ReappearanceAcrossRestart),
+            ("I11 Discarded duplicate variant pointing at another item blocks that item", HiddenVariantCollision),
+            ("I12 Review item whose current path moves onto another item blocks it", CurrentPathCollision),
+            ("I13 Short absence then changed title or size requires review", ShortAbsenceChangedEvidence),
             ("I08 Implementation change for a definition ID is an identity conflict", IdentityChange),
             ("I09 Display-name change is harmless", RenameHarmless),
             ("X01 Poisoned path is sticky review with evidence retained", PoisonedPath),
@@ -65,7 +70,7 @@ internal static class Program
             ("C04 Implausible timestamps ingest nothing", ImplausibleTimestamps),
             ("R01 Replayed or older sequences return the identical state", Replay),
             ("R02 Encode/decode restart equals uninterrupted run", RestartEquivalence),
-            ("R03 Adapter sequence reset after restart is ignored, then stale", SequenceReset),
+            ("R03 Adapter sequence reset is flagged at once and blocks readiness", SequenceReset),
             ("R04 Canonical encoding ignores input order", CanonicalOrder),
             ("R05 Decoder fails closed on tampering and malformed documents", DecoderRejects),
             ("R06 Evidence digest tracks record changes only", EvidenceDigest),
@@ -282,6 +287,16 @@ internal static class Program
         Eq(InventoryItemState.CompletedStable, Rec(s, Sab, "a").State, "re-proven");
     }
 
+    private static void UnknownRemaining()
+    {
+        var polls = Enumerable.Range(1, 8).Select(i => Poll(Sab, i, i, Item("a", total: 1000, remaining: null))).ToArray();
+        var s = Run(polls);
+        var r = Rec(s, Sab, "a");
+        Eq(InventoryItemState.CompletedSettling, r.State, "state");
+        HasReason(r, InventoryReason.RemainingBytesUnknown);
+        Eq(PlanningEligibility.Wait, Decision(s, Sab, "a", 8.5).Eligibility, "eligibility");
+    }
+
     private static void InvalidSizes()
     {
         foreach (var (total, remaining) in new (long?, long?)[] { (-1, 0), (100, -1), (100, 200) })
@@ -415,10 +430,61 @@ internal static class Program
     {
         var s = Run(GoneFor3(StableRun("a"), 4, 3), Policy(), Poll(Sab, 7, 6, Item("a")));
         var r = Rec(s, Sab, "a");
-        Eq(InventoryItemState.CompletedSettling, r.State, "reappeared");
+        Eq(InventoryItemState.RequiresReview, r.State, "reappeared");
         HasReason(r, InventoryReason.ReappearedAfterMissing);
-        s = Run(s, Policy(), Poll(Sab, 8, 7, Item("a")), Poll(Sab, 9, 8, Item("a")));
-        Eq(InventoryItemState.CompletedStable, Rec(s, Sab, "a").State, "re-proven");
+        s = Run(s, Policy(), Poll(Sab, 8, 7, Item("a")), Poll(Sab, 9, 8, Item("a")), Poll(Sab, 10, 9, Item("a")));
+        Eq(InventoryItemState.RequiresReview, Rec(s, Sab, "a").State, "never requalifies automatically");
+        Eq(PlanningEligibility.OperatorReview, Decision(s, Sab, "a", 9.5).Eligibility, "eligibility");
+    }
+
+    private static void ReappearanceAcrossRestart()
+    {
+        var restored = InventoryCodec.Decode(InventoryCodec.Encode(GoneFor3(StableRun("a"), 4, 3)));
+        True(restored.Succeeded, "decode");
+        var impostor = Item("a", total: 4242, title: "A different album");
+        var s = Run(restored.State!, Policy(), Poll(Sab, 7, 6, impostor), Poll(Sab, 8, 7, impostor), Poll(Sab, 9, 8, impostor));
+        var r = Rec(s, Sab, "a");
+        Eq(InventoryItemState.RequiresReview, r.State, "state");
+        HasReason(r, InventoryReason.ReappearedAfterMissing);
+        Eq(PlanningEligibility.OperatorReview, Decision(s, Sab, "a", 8.5).Eligibility, "eligibility");
+    }
+
+    private static InventoryState TwoStable() => Run(
+        Poll(Sab, 1, 0, Item("a"), Item("b")), Poll(Sab, 2, 1, Item("a"), Item("b")), Poll(Sab, 3, 2, Item("a"), Item("b")));
+
+    private static void HiddenVariantCollision()
+    {
+        var before = TwoStable();
+        Eq(PlanningEligibility.ReadyForPlanning, Decision(before, Sab, "b", 2.5).Eligibility, "b ready before");
+        var s = Run(before, Policy(), Poll(Sab, 4, 3, Item("a"), Item("a", path: $"{Complete}/b"), Item("b")));
+        True(Rec(s, Sab, "a").VariantPaths.Contains($"{Complete}/b"), "variant path retained as evidence");
+        HasReason(Rec(s, Sab, "b"), InventoryReason.OutputPathCollision);
+        True(Decision(s, Sab, "b", 3.5).Eligibility != PlanningEligibility.ReadyForPlanning, "b must not stay ready");
+        var after = InventoryCodec.Decode(InventoryCodec.Encode(s));
+        True(after.Succeeded, $"decode: {after.Error}");
+        Eq(InventoryCodec.Encode(s), InventoryCodec.Encode(after.State!), "variant evidence survives restart");
+    }
+
+    private static void CurrentPathCollision()
+    {
+        var s = Run(TwoStable(), Policy(), Poll(Sab, 4, 3, Item("a", path: $"{Complete}/b"), Item("b")));
+        Eq(InventoryItemState.RequiresReview, Rec(s, Sab, "a").State, "a changed path");
+        HasReason(Rec(s, Sab, "b"), InventoryReason.OutputPathCollision);
+        Eq(PlanningEligibility.OperatorReview, Decision(s, Sab, "b", 3.5).Eligibility, "b blocked");
+    }
+
+    private static void ShortAbsenceChangedEvidence()
+    {
+        foreach (var changed in new[] { Item("a", title: "Other title"), Item("a", total: 2000) })
+        {
+            var s = Run(StableRun("a"), Policy(), Poll(Sab, 4, 3), Poll(Sab, 5, 4, changed));
+            var r = Rec(s, Sab, "a");
+            Eq(InventoryItemState.RequiresReview, r.State, "state");
+            HasReason(r, InventoryReason.ReappearedWithChangedEvidence);
+        }
+
+        var same = Run(StableRun("a"), Policy(), Poll(Sab, 4, 3), Poll(Sab, 5, 4, Item("a")));
+        Eq(InventoryItemState.CompletedSettling, Rec(same, Sab, "a").State, "unchanged return only re-proves stability");
     }
 
     private static void IdentityChange()
@@ -612,8 +678,8 @@ internal static class Program
     {
         var s = StableRun("a");
         True(ReferenceEquals(s, InventoryEngine.Apply(s, Policy(), Poll(Sab, 3, 2, Item("a")))), "same sequence");
-        True(ReferenceEquals(s, InventoryEngine.Apply(s, Policy(), Poll(Sab, 1, 9, Item("zzz")))), "older sequence");
-        True(ReferenceEquals(s, InventoryEngine.Apply(s, Policy(), Failed(Sab, 2, 9))), "older failure");
+        True(ReferenceEquals(s, InventoryEngine.Apply(s, Policy(), Poll(Sab, 1, 0.5, Item("zzz")))), "late delivery of an older poll");
+        True(ReferenceEquals(s, InventoryEngine.Apply(s, Policy(), Failed(Sab, 2, 1.5))), "late delivery of an older failure");
     }
 
     private static void RestartEquivalence()
@@ -638,9 +704,14 @@ internal static class Program
     private static void SequenceReset()
     {
         var restored = InventoryCodec.Decode(InventoryCodec.Encode(StableRun("a"))).State!;
-        var s = Run(restored, Policy(), Poll(Sab, 0, 10, Item("new")), Poll(Sab, 1, 11, Item("new")));
-        True(ReferenceEquals(restored, s), "a sequence reset is treated as replay and ingests nothing");
-        Eq(ClientHealthStatus.Stale, Health(s, Sab, 30).Status, "surfaces as stale, not as success");
+        Eq(PlanningEligibility.ReadyForPlanning, Decision(restored, Sab, "a", 2.5).Eligibility, "ready before the reset");
+        var s = Run(restored, Policy(), Poll(Sab, 0, 2.4, Item("new")));
+        True(!s.Items.ContainsKey(new ItemKey(Sab.DefinitionId, "new")), "nothing ingested from a reset adapter");
+        Eq(ClientHealthStatus.SequenceReset, Health(s, Sab, 2.5).Status, "flagged immediately, not after StaleAfter");
+        Eq(PlanningEligibility.Wait, Decision(s, Sab, "a", 2.5).Eligibility, "previously ready item blocked at once");
+        s = Run(s, Policy(), Poll(Sab, 4, 3, Item("a")), Poll(Sab, 5, 4, Item("a")), Poll(Sab, 6, 5, Item("a")));
+        Eq(ClientHealthStatus.SequenceReset, Health(s, Sab, 5.5).Status, "sticky until operator review");
+        Eq(PlanningEligibility.Wait, Decision(s, Sab, "a", 5.5).Eligibility, "still blocked");
     }
 
     private static void CanonicalOrder()
@@ -795,7 +866,7 @@ internal static class Program
                     var count = rng.Next(4);
                     var snapshots = Enumerable.Range(0, count).Select(_ =>
                         Item(ids[rng.Next(ids.Length)], statuses[rng.Next(statuses.Length)], paths[rng.Next(paths.Length)],
-                            total: rng.Next(5) == 0 ? null : 1000, remaining: rng.Next(4) == 0 ? 7 : 0)
+                            total: rng.Next(5) == 0 ? null : 1000, remaining: rng.Next(6) switch { 0 => 7, 1 => null, _ => 0 })
                         with { OutputPath = paths[rng.Next(paths.Length)] }).ToArray();
                     poll = Poll(client, ++sequence[client.DefinitionId], minutes, snapshots);
                     foreach (var snap in snapshots.Where(s => s.OutputPath is not null && PathCanonicalizer.CheckOutput(s.OutputPath, PathStyle.Posix, policy.AllowedOutputRoots).Verdict is PathVerdict.Unsafe or PathVerdict.OutsideAllowedRoots))
@@ -823,6 +894,9 @@ internal static class Program
                         Eq(InventoryItemState.CompletedStable, record.State, $"seed {seed}: ready implies stable");
                         Eq(0, client2.ConsecutiveFailures, $"seed {seed}: ready with failing client");
                         True(record.StablePollCount >= policy.MinStablePolls, $"seed {seed}: ready without polls");
+                        True(!state.Items.Values.Any(other => other.Key != record.Key && Overlaps(record, other)),
+                            $"seed {seed}: ready while another record claims an overlapping path");
+                        Eq((long?)0, record.RemainingBytes, $"seed {seed}: ready without explicit zero remaining");
                         True(record.Key.DownloadId != "shared" || !state.Items.Keys.Any(k => k.DownloadId == "shared" && k != record.Key), $"seed {seed}: ready while duplicated across clients");
                     }
 
@@ -832,6 +906,14 @@ internal static class Program
             }
         }
     }
+
+    /// <summary>Independent oracle: equal, case-variant or nested claimed paths (case-insensitive).</summary>
+    private static bool Overlaps(ItemRecord a, ItemRecord b) =>
+        a.ClaimedPaths().Any(x => b.ClaimedPaths().Any(y =>
+        {
+            var (u, v) = (x.ToUpperInvariant(), y.ToUpperInvariant());
+            return u == v || PathCanonicalizer.IsStrictlyUnder(u, v, PathStyle.Posix) || PathCanonicalizer.IsStrictlyUnder(v, u, PathStyle.Posix);
+        }));
 
     private static string InventoryEscape(string value) =>
         string.Concat(value.Take(40).Select(c => char.IsControl(c) || c > '\u007E' ? $"\\u{(int)c:X4}" : c.ToString()));

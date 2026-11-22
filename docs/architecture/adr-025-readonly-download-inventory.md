@@ -1,6 +1,6 @@
 # ADR-025: Read-only, restart-safe completed-download inventory (M10, pure layer)
 
-**Status:** DRAFT for independent review. Pure domain + specs only. No host adapter, persistence adapter, importer, cleanup, settlement or production change.
+**Status:** DRAFT, revised after the blocking review on PR #32 (variant-path collisions, sticky reappearance, explicit zero remaining bytes, sequence-reset detection). Pure domain + specs only. No host adapter, persistence adapter, importer, cleanup, settlement or production change.
 **Issue:** [#21](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/21). **Host baseline:** stock Lidarr v3.1.6.5079 (`da7b4dfb`). **Date:** 2026-11-22.
 
 ## Decision
@@ -28,7 +28,7 @@ in `src/Crescendarr.Core/Inventory/`, with no Lidarr types, no storage, network,
 1. The client reported `Completed` in at least `MinStablePolls` (2 or more; conservative default 3) consecutive successful polls of that client.
 2. Between those polls there was no failed poll, absence, clock regression, implausible timestamp, or gap larger than `MaxPollGap`.
 3. Output path, total bytes and remaining bytes were identical in every one of those polls.
-4. Remaining bytes were 0 and total bytes were known and non-zero (`RequireKnownSize`). Stock `TotalSize` is non-nullable, so 0 is treated as unknown.
+4. Remaining bytes were reported as an explicit 0 (null never qualifies: `RemainingBytesUnknown`), and total bytes were known and non-zero (`RequireKnownSize`). Stock `TotalSize` and `RemainingSize` are both non-nullable, so a total of 0 is treated as unknown.
 5. At least `MinStableAge` (default 2 minutes) elapsed on the observer clock between the first and the latest of those polls.
 
 Evaluation also refuses a stable item when any of these holds:
@@ -43,20 +43,23 @@ Evaluation also refuses a stable item when any of these holds:
 |---|---|
 | Empty, padded, control/bidi/invisible, non-NFC or over-256-char download ID | Not ingested; counted on the client (`UnkeyableItemsTotal`), client `Degraded` |
 | Identical duplicate entries in one poll | Idempotent |
-| Conflicting duplicate entries in one poll | `Ambiguous`. Every variant is judged, and a poisoned variant escalates to `RequiresReview` (bug found by fuzzing) |
+| Conflicting duplicate entries in one poll | `Ambiguous`. Every variant is judged, and a poisoned variant escalates to `RequiresReview` (bug found by fuzzing). Every variant's canonical path is kept in `VariantPaths` and joins collision detection, so a discarded variant pointing at another item's output blocks that item too (review finding 1) |
 | Same download ID in two clients | Both `Ambiguous`, whatever the poll order. Stock `TrackedDownloadService` caches by download ID alone (`TrackedDownloadService.cs:229`), so the host itself cannot separate them |
-| Equal, case-variant or nested output paths across items | All involved items `Ambiguous`. Compared case-insensitively on every host, because SMB/NAS storage may fold case |
+| Equal, case-variant or nested output paths across items | All involved items `Ambiguous`. Every *claimed* path counts: anchored, current and variant paths. Compared case-insensitively on every host, because SMB/NAS storage may fold case |
 | Relative path, `.`/`..`, POSIX backslash or leading `//`; Windows UNC, device, ADS, reserved or trailing-dot path; URI; control/bidi/invisible/U+FFFD/non-NFC characters | `RequiresReview` (`OutputPathUnsafe`); sanitized raw evidence retained |
 | Path outside the allowed roots, or matching more than one | `RequiresReview` |
 | Path, casing or root change after completion | `RequiresReview` with a specific reason. Changes before completion (incomplete to complete folder) are allowed |
 | Reappearance after `MissingFromClient` with a different path | `RequiresReview` (`IdReusedWithDifferentPath`) |
-| Reappearance with the same path | `CompletedSettling`; stability must be re-proven |
+| Reappearance after `MissingFromClient` with the same path | `RequiresReview` (`ReappearedAfterMissing`), sticky, including across encode/decode restarts. Without immutable job provenance, a different job may reuse both ID and path (review finding 2; this replaces the earlier "re-prove stability" assumption) |
+| Return after a shorter absence with a changed title or total size | `RequiresReview` (`ReappearedWithChangedEvidence`). An unchanged return only re-proves stability |
+| Completed with unreported (null) remaining bytes | Never stable (`RemainingBytesUnknown`). An adapter that cannot supply an explicit 0 can never make an item ready (review finding 3) |
 | `Completed` to anything else, `Failed`, `Unknown` or undefined status | `RequiresReview` |
 | Negative size, or remaining greater than total | `RequiresReview` |
 | `GetItems` failure, or a "successful" poll with no items array | No absence counted, stability reset, evidence kept, client `Unavailable` |
 | Absent in one successful poll | `NotSeenInLatestPoll`, stability reset |
 | Absent in `MissingAfterPolls` polls | `MissingFromClient`, evidence kept, eligibility `NoAction` |
-| Poll sequence not greater than the last processed one (replay, out-of-order delivery, adapter reset after restart) | Ignored; returns the identical state object. A reset adapter therefore surfaces as `Stale`, never as fresh data |
+| Poll sequence not greater than the last processed one, with a timestamp not newer than the last poll (replay, late delivery) | Ignored; returns the identical state object |
+| Poll sequence not greater than the last processed one, but with a newer timestamp (adapter lost its persisted counter) | Nothing ingested; client gets sticky `SequenceReset` and health `SequenceReset` **at once**, so previously ready items stop being ready immediately rather than after `StaleAfter` |
 | Clock regression, gap above `MaxPollGap`, timestamp outside 2000-2200 | Stability reset; client flagged |
 | Stock CDH reported ON | Nothing ingested; previously completed items `RequiresReview` (`StockHandlingWasActive`); client `StockHandlingActive` |
 | Implementation not allow-listed | Nothing ingested; existing items `RequiresReview`; client `Unsupported` |
@@ -65,10 +68,11 @@ Evaluation also refuses a stable item when any of these holds:
 
 ## What is proven, and how
 
-- **Executable (pure, CI):** 59 inventory specs in `tests/Crescendarr.Core.Inventory.Spec`, covering:
+- **Executable (pure, CI):** 64 inventory specs in `tests/Crescendarr.Core.Inventory.Spec`, covering:
   - permutation invariance over 25 seeds, and order independence of interleaved clients over 25 seeds;
   - restart at every cut point of a 10-poll trace, giving byte-identical canonical state after encode, decode and resume;
-  - a 200-seed adversarial fuzz with random statuses, poisoned paths, clock regressions, gaps, failures and replays. It asserts round-trip identity, replay identity, sticky review for poisoned keys, `Ready` only for stable items of healthy clients with no cross-client duplicate, and `NoAction` for missing items.
+  - a 200-seed adversarial fuzz with random statuses, poisoned paths, clock regressions, gaps, failures and replays. It asserts round-trip identity, replay identity, sticky review for poisoned keys, `Ready` only for stable items of healthy clients with no cross-client duplicate, no overlapping claimed path (checked by an independent oracle) and an explicit zero remaining, and `NoAction` for missing items.
+  - Each blocking review finding has a targeted spec (I07, I10, I11, I12, I13, L10, R03). Reintroducing each defect was confirmed to fail its specs. The fuzz alone did not catch the null-remaining defect, so targeted specs remain necessary.
 
   The 29 existing planner specs still pass.
 - **Source-verified (v3.1.6.5079), not executed by this change:**
@@ -89,7 +93,7 @@ Evaluation also refuses a stable item when any of these holds:
 
 ## Health and retry signals a future adapter would expose
 
-- **Per-client `ClientHealthStatus`:** `Healthy`, `NeverSucceeded`, `Unavailable` (with `ConsecutiveFailures` and a sanitized `LastFailureReason`), `Stale`, `ClockAhead`, `Unsupported`, `IdentityConflict`, `StockHandlingActive`, `Degraded`.
+- **Per-client `ClientHealthStatus`:** `Healthy`, `NeverSucceeded`, `Unavailable` (with `ConsecutiveFailures` and a sanitized `LastFailureReason`), `Stale`, `ClockAhead`, `Unsupported`, `IdentityConflict`, `SequenceReset`, `StockHandlingActive`, `Degraded`.
 - **Counts:** `ReadyCount`, `ReviewCount`, `MissingCount`, and `AnyClientUnhealthy`. These suit a Lidarr health check, since the stock queue hides completed jobs while CDH is off.
 - **Retries:** the core never retries or polls anything itself. It consumes whatever polls the host's own refresh produces; retry is simply the next poll. Backoff belongs to the stock monitor, not to Crescendarr.
 
@@ -102,7 +106,9 @@ Evaluation also refuses a stable item when any of these holds:
 ## Connection to a future journaled executor (not implemented)
 
 1. The executor may consider only `ReadyForPlanning` items. It must re-read the host's tracked download (album mapping, history) and revalidate the path on the host before any plan.
-2. `ItemDecision.EvidenceDigest` (SHA-256 of the canonical record) acts as an optimistic-concurrency token. The executor's journal records it, and the operation aborts if the digest changes before commit.
+2. `ItemDecision.EvidenceDigest` (SHA-256 of one canonical item record) is a change detector for that record only. It does **not** cover client health, root policy or live host state. The executor must re-run `Evaluate` and its live-host checks immediately before every write, and use the digest only as an extra "nothing changed" guard.
+2a. The encoded document's `payloadSha256` (and the digest above) is an **unkeyed** hash. It detects accidental corruption and truncation; it is **not authentication**, because anyone able to edit the stored text can recompute it. Tamper resistance, if needed, belongs to the persistence adapter (file permissions, or a keyed MAC with host-held key material) and needs its own review.
+2b. The persistence adapter must save the poll sequence atomically with the state, before acting on the next poll. A lost counter is detected (`SequenceReset`) and fails closed, but it is sticky: recovering requires an audited operator reset.
 3. Import, keep and settlement outcomes live in the executor's own journal. They are never written back as inventory states. The inventory can only ever say "the client still reports this as completed and stable".
 4. `MissingFromClient` never triggers recovery, cleanup or settlement. An executor operation open for a missing item stays open until the operator reviews it.
 5. Sticky states need an explicit operator acknowledgement API in a later milestone. None exists yet, by design.
@@ -111,7 +117,10 @@ Evaluation also refuses a stable item when any of these holds:
 
 - Path checks are lexical. Symlinks, bind-mount remaps, SMB case folding of *different* strings, and Unicode case folding beyond ordinal-ignore-case remain host-side revalidation duties.
 - Records are never pruned. Size is capped per client only through `MaxItemsPerClient`, which blocks new items once full. A retention and pruning policy needs its own review.
-- Sticky states have no reset path yet, so long-lived installations will accumulate review items.
+- Sticky states (`Ambiguous`, `RequiresReview`, client `SequenceReset`, `IdentityConflict`) have no reset path yet, so long-lived installations will accumulate review items. Per the review, they stay sticky pending an audited operator-reset flow.
+- Conservative defaults (3 polls, 2 minutes, 5-minute gap, 15 minutes stale, 3 absences) are **provisional** until stock refresh cadence is measured on a disposable host.
+- Case-insensitive collision handling on POSIX hosts is retained on purpose; the over-blocking risk is accepted at this stage.
+- No production adapter may rely on full `GetItems` snapshots, album mapping or stable Blackhole IDs before disposable-host verification.
 - No persistence adapter is included. Writing the encoded text somewhere atomic is future work, and it belongs with the journaling work.
 
 ## Needs a disposable full Lidarr host and the synthetic Blackhole client

@@ -28,6 +28,9 @@ public enum ClientHealthStatus
     IdentityConflict = 7,
     StockHandlingActive = 8,
     Degraded = 9,
+
+    /// <summary>The adapter lost its persisted poll sequence. Sticky; blocks readiness at once.</summary>
+    SequenceReset = 10,
 }
 
 public sealed record ClientHealth(
@@ -131,6 +134,7 @@ public static class InventoryEvaluator
         ClientHealthStatus status;
 
         if (client.StickyReasons.Contains(InventoryReason.ClientIdentityConflict)) status = ClientHealthStatus.IdentityConflict;
+        else if (client.StickyReasons.Contains(InventoryReason.SequenceReset)) status = ClientHealthStatus.SequenceReset;
         else if (!policy.Supports(client.Implementation) || client.LastPollReasons.Contains(InventoryReason.ClientUnsupported)) status = ClientHealthStatus.Unsupported;
         else if (client.LastPollReasons.Contains(InventoryReason.StockHandlingActive)) status = ClientHealthStatus.StockHandlingActive;
         else if (client.ConsecutiveFailures > 0) status = ClientHealthStatus.Unavailable;

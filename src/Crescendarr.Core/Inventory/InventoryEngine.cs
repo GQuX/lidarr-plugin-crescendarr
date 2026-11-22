@@ -30,8 +30,19 @@ public static class InventoryEngine
         var id = poll.Client.DefinitionId;
         state.Clients.TryGetValue(id, out var existingClient);
 
-        // Replay or out-of-order delivery: ordering is owned by the sequence, never the clock.
-        if (existingClient is not null && poll.Sequence <= existingClient.LastSequence) return state;
+        // Ordering is owned by the sequence, never the clock. A non-increasing sequence is
+        // either a replay / late delivery (not newer than the last poll: ignored, identical
+        // state) or an adapter that lost its persisted counter (newer timestamp). The latter
+        // is flagged sticky and blocks readiness at once instead of waiting for StaleAfter.
+        if (existingClient is not null && poll.Sequence <= existingClient.LastSequence)
+        {
+            var lostCounter = existingClient.LastPollTicks is { } previous && poll.ObservedAt.UtcTicks > previous;
+            if (!lostCounter || existingClient.StickyReasons.Contains(InventoryReason.SequenceReset)) return state;
+
+            var flagged = existingClient with { StickyReasons = existingClient.StickyReasons.Add(InventoryReason.SequenceReset) };
+            var held = MapClientItems(state.Items, id, r => ResetStability(r, InventoryReason.StabilityResetSequenceReset));
+            return Finish(state, flagged, held, policy);
+        }
 
         var client = existingClient ?? ClientRecord.New(poll.Client);
         var items = state.Items;
@@ -156,6 +167,17 @@ public static class InventoryEngine
             {
                 // Every conflicting variant is judged; the worst evidence wins, so a poisoned
                 // variant cannot hide behind a clean one and be reported as merely Ambiguous.
+                var variantPaths = record.VariantPaths.ToBuilder();
+                foreach (var variant in distinct)
+                {
+                    var check = PathCanonicalizer.CheckOutput(variant.OutputPath, policy.PathStyle, policy.AllowedOutputRoots);
+                    if (check.CanonicalPath is not null) variantPaths.Add(check.CanonicalPath);
+                }
+
+                // Every claimed path joins global collision detection, so a discarded variant
+                // cannot silently point at another item's output.
+                record = record with { VariantPaths = variantPaths.ToImmutable() };
+
                 foreach (var variant in distinct.Skip(1))
                 {
                     var alternative = Observe(key, existing, variant, policy, ticks, poll.Sequence, stabilityReset);
@@ -207,12 +229,19 @@ public static class InventoryEngine
             LastStatus: ClientItemStatus.Unknown, Title: null, Category: null,
             CurrentPath: null, CurrentRoot: null, AnchoredPath: null, AnchoredRoot: null, RawPathEvidence: null,
             TotalBytes: null, RemainingBytes: null, EverCompleted: false,
-            StablePollCount: 0, StableSinceTicks: null, ConsecutiveAbsences: 0);
+            StablePollCount: 0, StableSinceTicks: null, ConsecutiveAbsences: 0, VariantPaths: ItemRecord.NoPaths);
 
         var reappeared = record.State == InventoryItemState.MissingFromClient;
         var escalations = new List<InventoryReason>();
         var notes = ImmutableSortedSet.CreateBuilder<InventoryReason>();
-        if (reappeared) notes.Add(InventoryReason.ReappearedAfterMissing);
+
+        // Without immutable job provenance, a job that returns after MissingFromClient may be
+        // a different download reusing both ID and path (client retention, restart). Always
+        // hold it for review. After a shorter absence, changed title or size is equally suspect.
+        if (reappeared) escalations.Add(InventoryReason.ReappearedAfterMissing);
+        else if (record.ConsecutiveAbsences > 0 && record.EverCompleted &&
+                 (!string.Equals(record.Title, snapshot.Title, StringComparison.Ordinal) || record.TotalBytes != snapshot.TotalBytes))
+            escalations.Add(InventoryReason.ReappearedWithChangedEvidence);
 
         var metadataClean = InventoryText.IsCleanOptional(snapshot.Title) && InventoryText.IsCleanOptional(snapshot.Category);
         if (!metadataClean) escalations.Add(InventoryReason.UntrustedMetadata);
@@ -300,7 +329,10 @@ public static class InventoryEngine
 
         // Completed, trusted, and not escalated. Anchor the output path on first completion.
         var provable = true;
-        if (snapshot.RemainingBytes is > 0) { notes.Add(InventoryReason.CompletedWithRemainingBytes); provable = false; }
+        // Completion must be proven by an explicit zero; stock RemainingSize is non-nullable,
+        // so an adapter that cannot supply it must report null and the item never stabilizes.
+        if (snapshot.RemainingBytes is null) { notes.Add(InventoryReason.RemainingBytesUnknown); provable = false; }
+        else if (snapshot.RemainingBytes > 0) { notes.Add(InventoryReason.CompletedWithRemainingBytes); provable = false; }
         // Stock DownloadClientItem.TotalSize is a non-nullable long, so clients that do not
         // know a size report 0. Zero is therefore treated exactly like an unknown size.
         if (policy.RequireKnownSize && snapshot.TotalBytes is null or 0) { notes.Add(InventoryReason.SizeUnknown); provable = false; }
@@ -423,13 +455,16 @@ public static class InventoryEngine
         // may fold case even when the Lidarr host path grammar is case-sensitive. Two items
         // collide when their output paths are equal or one contains the other.
         var separator = policy.PathStyle == PathStyle.Windows ? '\\' : '/';
-        var owners = new Dictionary<string, List<ItemKey>>(StringComparer.OrdinalIgnoreCase);
+        // Every path a record has claimed participates: anchored, current, and conflicting
+        // variants. A record never collides with itself.
+        var owners = new Dictionary<string, SortedSet<ItemKey>>(StringComparer.OrdinalIgnoreCase);
         foreach (var record in items.Values)
         {
-            var path = record.AnchoredPath ?? record.CurrentPath;
-            if (path is null) continue;
-            if (!owners.TryGetValue(path, out var list)) owners[path] = list = new List<ItemKey>();
-            list.Add(record.Key);
+            foreach (var path in record.ClaimedPaths())
+            {
+                if (!owners.TryGetValue(path, out var set)) owners[path] = set = new SortedSet<ItemKey>();
+                set.Add(record.Key);
+            }
         }
 
         var colliding = new SortedSet<ItemKey>();
@@ -439,8 +474,9 @@ public static class InventoryEngine
             for (var cut = path.LastIndexOf(separator); cut > 0; cut = path.LastIndexOf(separator, cut - 1))
             {
                 if (!owners.TryGetValue(path[..cut], out var ancestors)) continue;
-                colliding.UnionWith(keys);
-                colliding.UnionWith(ancestors);
+                var involved = new SortedSet<ItemKey>(keys);
+                involved.UnionWith(ancestors);
+                if (involved.Count > 1) colliding.UnionWith(involved);
             }
         }
 
