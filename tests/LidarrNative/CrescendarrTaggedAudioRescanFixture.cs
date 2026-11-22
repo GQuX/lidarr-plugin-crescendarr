@@ -15,13 +15,11 @@ using NLog;
 using NUnit.Framework;
 using NzbDrone.Common;
 using NzbDrone.Common.Disk;
-using NzbDrone.Common.Messaging;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.Datastore;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.DecisionEngine.Specifications;
-using NzbDrone.Core.Download;
 using NzbDrone.Core.Extras;
 using NzbDrone.Core.Extras.Files;
 using NzbDrone.Core.Extras.Lyrics;
@@ -35,7 +33,6 @@ using NzbDrone.Core.MediaFiles.TrackImport.Identification;
 using NzbDrone.Core.MediaFiles.TrackImport.Specifications;
 using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Music;
-using NzbDrone.Core.Music.Events;
 using NzbDrone.Core.Organizer;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Profiles.Qualities;
@@ -241,7 +238,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             info[0] = 0x10; info[1] = 0x00;              // min block 4096
             info[2] = 0x10; info[3] = 0x00;              // max block 4096
             // min/max frame size unknown (0): bytes 4..9 stay zero
-            ulong packed = ((ulong)rate << 44) | (0UL << 41) | (15UL << 36) | (ulong)samples;
+            var packed = ((ulong)rate << 44) | (0UL << 41) | (15UL << 36) | (ulong)samples;
             for (var b = 0; b < 8; b++) info[10 + b] = (byte)(packed >> (56 - (8 * b)));
             // MD5 (bytes 18..33) zero = unknown
             var header = new byte[] { (byte)'f', (byte)'L', (byte)'a', (byte)'C', 0x80, 0x00, 0x00, 0x22 }; // last block, STREAMINFO, length 34
