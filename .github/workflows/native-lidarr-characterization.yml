@@ -41,6 +41,11 @@ jobs:
           cp crescendarr/tests/LidarrNative/CrescendarrAlbumUpgradeCharacterizationFixture.cs \
             upstream-lidarr/src/NzbDrone.Core.Test/MediaFiles/CrescendarrAlbumUpgradeCharacterizationFixture.cs
           echo "Upstream source pinned at $actual, characterization fixture staged in ephemeral checkout" >> "$GITHUB_STEP_SUMMARY"
+      # The 2026 NuGet advisory database flags a historical ImageSharp dependency
+      # in this exact 2026 Lidarr source; its original TreatWarningsAsErrors blocks
+      # characterization before compilation. Disabling audit applies ONLY to this
+      # ephemeral historical-source test and does not change package versions.
+      # Never interpret this as production dependency safety.
       - name: Execute native importer + quality specification fixture (no actual media)
         shell: bash
         run: |
@@ -49,5 +54,6 @@ jobs:
             --configuration Debug \
             --filter 'FullyQualifiedName~CrescendarrAlbumUpgradeCharacterizationFixture' \
             --logger 'console;verbosity=normal' \
-            -p:EnableAnalyzers=false
+            -p:EnableAnalyzers=false \
+            -p:NuGetAudit=false
           echo "Native importer characterization PASSED in a clean source checkout" >> "$GITHUB_STEP_SUMMARY"
