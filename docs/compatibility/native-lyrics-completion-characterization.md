@@ -1,3 +1,5 @@
+> **Clarification after independent review:** The 11+1 ImportFailed scenario mocked the history predicate as false; stock code can mark an incompletely imported album as Imported when the latest album history event is TrackFileImported. See the [unmocked native history predicate tests](native-history-rescan-characterization.md). Do **not** treat 11+1 => ImportFailed as a representative end-to-end result.
+
 # Native Lidarr lyrics and download-settlement characterization
 
 **Date:** 2026-11-22  
