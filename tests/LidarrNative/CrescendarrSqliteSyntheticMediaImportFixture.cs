@@ -241,7 +241,12 @@ namespace NzbDrone.Core.Test.MediaFiles
                     AlbumId = album.Id,
                     Size = oldBytes[i].LongLength,
                     Modified = File.GetLastWriteTimeUtc(ownedPath),
-                    Quality = new QualityModel(i == Total ? Quality.FLAC : Quality.MP3_192)
+                    Quality = new QualityModel(i == Total ? Quality.FLAC : Quality.MP3_192),
+                    // Stock ExtraFileService.Handle(TrackFileDeletedEvent) accesses
+                    // trackFile.Artist.Value before enumerating lyric rows. The old
+                    // M12 fixture used a mocked event aggregator and never needed
+                    // this relationship; real event fan-out does.
+                    Artist = new LazyLoaded<Artist>(artist)
                 };
                 Db.Insert(old);
                 previous[i] = old;
