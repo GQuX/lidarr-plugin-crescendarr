@@ -1,3 +1,5 @@
+> **SUPERSEDED after independent review:** This v0.1 document is preserved as a historical proposal, **not** an approved recovery protocol. Its states overpromise durability, omit mandatory scan exclusion and oversize the upstream change. Use [incremental plan v0.2](host-selective-import-incremental-v0.2.md) and [review triage](../reviews/2026-11-22-adr024-review-triage.md) instead.
+
 # Proposed host-owned recoverable selective-import protocol (v0.1)
 
 **Status:** DESIGN FOR ADVERSARIAL REVIEW ONLY, not implemented, not an upstream API, not a production-safe plugin.
@@ -8,7 +10,7 @@
 
 - [12-track native characterization](../compatibility/native-12-track-characterization.md): 11 accepted upgrades and one inferior candidate, yet stock `replaceExisting=true` schedules deletion of all 12 existing album files. Passing `false` avoids the album-wide removal but still calls `SetMonitored`.
 - [Native fault injection](../compatibility/native-upgrade-failure-characterization.md): in stock `UpgradeMediaFileService`, the old path and DB relation are removed before an attempted replacement move/copy; an injected `IOException` occurs after those calls.
-- [Native lyrics + completion tests](../compatibility/native-lyrics-completion-characterization.md): registered `.lrc` is recycled when its TrackFile is upgraded; lyric-only staging passes the folder-deletion eligibility check; 11 imported + 1 intentionally kept results in ImportFailed without qualifying history.
+- [Native lyrics + completion tests](../compatibility/native-lyrics-completion-characterization.md): registered `.lrc` is recycled when its TrackFile is upgraded; lyric-only staging passes the folder-deletion eligibility check; 11 imported + 1 intentionally kept produced ImportFailed **only with the history checker mocked false**. Stock history event ordering can make partial work appear fully imported; this requires native history-backed tests.
 - [Independent-review triage](../reviews/2026-11-22-independent-review-triage.md): the outer `IDownloadedTracksImportService` DI override is a NO-GO production write path; a failed plugin can allow stock behavior on some host restart paths.
 - [Upstream Lidarr PR #6166](https://github.com/Lidarr/Lidarr/pull/6166) is open and unmerged as checked 2026-11-22; it addresses selected recordings but is not proven to solve general album quality merging, lyrics, completion and crash consistency.
 
