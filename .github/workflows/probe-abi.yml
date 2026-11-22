@@ -6,6 +6,7 @@ on:
   push:
     paths:
       - 'src/Crescendarr.Lidarr.Probe/**'
+      - 'src/Crescendarr.Lidarr.Preflight/**'
       - '.github/workflows/probe-abi.yml'
   pull_request:
     paths:
@@ -61,6 +62,12 @@ jobs:
         run: |
           set -euo pipefail
           dotnet build src/Crescendarr.Lidarr.Probe/Crescendarr.Lidarr.Probe.csproj \
+            --configuration Release --nologo \
+            -p:CrescendarrDisposableHostBuild=true \
+            -p:LidarrBinDir="${{ steps.locate.outputs.bin }}"
+          # The real host preflight code is ABI-checked separately but is not
+          # installable or registered as a Plugin, and has no write methods.
+          dotnet build src/Crescendarr.Lidarr.Preflight/Crescendarr.Lidarr.Preflight.csproj \
             --configuration Release --nologo \
             -p:CrescendarrDisposableHostBuild=true \
             -p:LidarrBinDir="${{ steps.locate.outputs.bin }}"
