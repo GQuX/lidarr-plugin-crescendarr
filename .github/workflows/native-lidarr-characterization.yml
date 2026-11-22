@@ -39,7 +39,7 @@ jobs:
           actual="$(git -C upstream-lidarr rev-parse HEAD)"
           test "$actual" = "da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd"
           # Only our original characterization files are copied to this throwaway tree.
-          cp crescendarr/tests/LidarrNative/Crescendarr*CharacterizationFixture.cs \
+          cp crescendarr/tests/LidarrNative/Crescendarr*Fixture.cs \
             upstream-lidarr/src/NzbDrone.Core.Test/MediaFiles/
           # Upstream Core.Test relies on a platform assembly loaded via Assembly.Load
           # in AutoMoqer. An isolated test-project-only build does not stage it.
