@@ -81,7 +81,7 @@ namespace NzbDrone.Core.Test.MediaFiles
                 .Verify(s => s.UpdateMany(It.Is<List<LyricFile>>(rows =>
                     rows.Count == 1 && rows[0].Id == _linkedLyric.Id)), Times.Once());
             Mocker.GetMock<IExtraFileRepository<LyricFile>>()
-                .Verify(s => s.InsertMany(It.IsAny<List<LyricFile>>()), Times.Never());
+                .Verify(s => s.InsertMany(It.Is<List<LyricFile>>(rows => rows.Count == 0)), Times.Once());
         }
 
         [Test]
@@ -103,7 +103,7 @@ namespace NzbDrone.Core.Test.MediaFiles
                     rows.Count == 1 && rows[0].Id == 0 &&
                     rows[0].TrackFileId == 152)), Times.Once());
             Mocker.GetMock<IExtraFileRepository<LyricFile>>()
-                .Verify(s => s.UpdateMany(It.IsAny<List<LyricFile>>()), Times.Never());
+                .Verify(s => s.UpdateMany(It.Is<List<LyricFile>>(rows => rows.Count == 0)), Times.Once());
         }
 
         [Test]
