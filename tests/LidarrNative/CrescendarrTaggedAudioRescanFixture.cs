@@ -86,7 +86,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             {
                 Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Sixth).TrackFileId, Is.EqualTo(0));
                 RunRealScan(w, recorder, "control");
-                AssertCommonInvariants(w, scenario);
+                FinishWithEvidence(w, scenario);
                 return;
             }
 
@@ -146,7 +146,14 @@ namespace NzbDrone.Core.Test.MediaFiles
                     break;
             }
 
-            AssertCommonInvariants(w, scenario);
+            FinishWithEvidence(w, scenario);
+        }
+
+        /// <summary>Evidence-gathering pass: reports every violated invariant at once.</summary>
+        private void FinishWithEvidence(World w, Scenario scenario)
+        {
+            var violations = CollectInvariants(w, scenario);
+            Assert.That(violations, Is.Empty, "Crescendarr invariants violated by the stock scan: " + string.Join("; ", violations));
         }
 
         // ------------------------------------------------------------------ world
@@ -545,7 +552,7 @@ namespace NzbDrone.Core.Test.MediaFiles
                 var item = d.Item;
                 Log($"M14_TAGGED_DECISION scan={label} file={Path.GetFileName(item.Path)} approved={d.Approved} " +
                     $"tracks=[{string.Join(",", item.Tracks?.Select(t => t.AbsoluteTrackNumber) ?? Enumerable.Empty<int>())}] " +
-                    $"release={item.Release?.ForeignReleaseId} quality={item.Quality?.Quality} existing={item.ExistingFile} " +
+                    $"release={item.Release?.ForeignReleaseId} quality={item.Quality?.Quality} existing={item.ExistingFile} additional={item.AdditionalFile} " +
                     $"rejections=[{string.Join(" | ", d.Rejections.Select(r => r.Reason))}]");
             }
 
@@ -555,27 +562,43 @@ namespace NzbDrone.Core.Test.MediaFiles
 
         // ------------------------------------------------------------------ assertions and evidence
 
-        private void AssertCommonInvariants(World w, Scenario scenario)
+        /// <summary>
+        /// Collects EVERY Crescendarr invariant outcome (no early exit) and logs it, so a single CI run
+        /// yields the complete stock behavior. Returns the violated invariants.
+        /// </summary>
+        private List<string> CollectInvariants(World w, Scenario scenario)
         {
-            // These are Crescendarr's hard invariants. Anything else about stock behavior is recorded as evidence.
-            Assert.That(File.ReadAllBytes(w.OwnedPaths[Total]), Is.EqualTo(w.OwnedBytes[Total]), "protected superior FLAC bytes");
-            Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Total).TrackFileId, Is.EqualTo(w.Previous[Total].Id), "protected track link");
-            Assert.That(Db.All<LyricFile>().Any(l => l.Id == w.LyricIds[Total] && l.TrackFileId == w.Previous[Total].Id), Is.True, "protected lyric row");
+            var violations = new List<string>();
+            void Check(bool ok, string name)
+            {
+                Log($"M14_TAGGED_INVARIANT scenario={scenario} {(ok ? "held" : "VIOLATED")} {name}");
+                if (!ok) violations.Add(name);
+            }
+
+            var tracks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber);
+            var rows = Db.All<TrackFile>();
+            var lyricRows = Db.All<LyricFile>();
+            Check(File.Exists(w.OwnedPaths[Total]) && File.ReadAllBytes(w.OwnedPaths[Total]).SequenceEqual(w.OwnedBytes[Total]), "protected superior FLAC bytes unchanged");
+            Check(tracks[Total].TrackFileId == w.Previous[Total].Id, "protected track still linked to its original TrackFile row");
+            Check(lyricRows.Any(l => l.Id == w.LyricIds[Total] && l.TrackFileId == w.Previous[Total].Id), "protected lyric row unchanged");
             for (var i = 1; i <= Total; i++)
             {
-                Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]), $"physical lyric {i}");
-                Assert.That(File.ReadAllBytes(w.BackupPaths[i]), Is.EqualTo(w.OwnedBytes[i]), $"independent backup {i}");
+                Check(File.Exists(w.LyricPaths[i]) && File.ReadAllBytes(w.LyricPaths[i]).SequenceEqual(w.LyricBytes[i]), $"physical lyric {i} present with original bytes");
+                Check(File.ReadAllBytes(w.BackupPaths[i]).SequenceEqual(w.OwnedBytes[i]), $"independent backup {i} intact");
             }
 
             var releases = Db.All<AlbumRelease>();
-            Assert.That(releases.Count(r => r.Monitored), Is.EqualTo(1));
-            Assert.That(releases.Single(r => r.Monitored).ForeignReleaseId, Is.EqualTo(ReleaseMbid), "monitored MusicBrainz release");
+            Check(releases.Count(r => r.Monitored) == 1 && releases.Single(r => r.Monitored).ForeignReleaseId == ReleaseMbid, "monitored MusicBrainz release unchanged");
+            Check(!rows.GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1), "no two TrackFile rows share a path");
+            Check(rows.All(f => tracks.Values.Any(t => t.TrackFileId == f.Id)), "every TrackFile row is linked to a track");
+            Check(tracks.Values.All(t => t.TrackFileId == 0 || rows.Any(f => f.Id == t.TrackFileId)), "no track points at a missing TrackFile row");
 
-            var decisions = Db.All<TrackFile>();
-            Log($"M14_TAGGED_SUMMARY scenario={scenario} trackFiles={decisions.Count} " +
-                $"duplicatePaths={decisions.GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).Count(g => g.Count() > 1)} " +
-                $"unlinkedTrackFiles={decisions.Count(f => !Db.All<Track>().Any(t => t.TrackFileId == f.Id))} " +
-                $"lyricRows={Db.All<LyricFile>().Count}");
+            var recycled = Directory.Exists(w.Recycle)
+                ? Directory.EnumerateFiles(w.Recycle, "*", SearchOption.AllDirectories).Select(Path.GetFileName).OrderBy(x => x).ToList()
+                : new List<string>();
+            Log($"M14_TAGGED_RECYCLE scenario={scenario} count={recycled.Count} lrc={recycled.Count(x => x.EndsWith(".lrc"))} files=[{string.Join(",", recycled)}]");
+            Log($"M14_TAGGED_SUMMARY scenario={scenario} trackFiles={rows.Count} lyricRows={lyricRows.Count} violations={violations.Count}");
+            return violations;
         }
 
         private void LogDb(string stage, World w)
