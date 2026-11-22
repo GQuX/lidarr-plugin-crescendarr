@@ -37,6 +37,12 @@ An independent plugin-only architecture review identified a viable **test-only**
 
 This does **not** yet demonstrate a safe audio import or a collision-free crash recovery path. No actual per-track replacement was performed in these tests. Do not enable writes or modify production Lidarr based on these results.
 
+## Native 12-track import against disposable SQLite and physical bytes
+
+An incremental [stock-Lidarr integration test](docs/compatibility/native-sqlite-synthetic-import.md) now runs `ImportApprovedTracks.Import(..., replaceExisting:false)` with a **real native upgrader and native TrackFile/Track/release repositories** backed by migrated disposable SQLite. It moves 11 incoming temporary byte files, preserves an existing better twelfth file, and uses native lyric-row unlink/reinsert to reassociate preserved `.lrc` bytes. All results are asserted from the test files and database. [Native CI: 35/35 passing](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45038419588).
+
+**This is not production-safe media merging.** The `.mp3` and `.flac` names wrap non-audio synthetic bytes; native audio tag reading/writing, complete identification and stock disk mover/recycler are still excluded, and the event aggregator is mocked. No crash/restart, scan race, actual download, multi-edition or SMB durability test has passed. No write-enabled plugin release exists.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
@@ -50,7 +56,7 @@ The current source is **only**:
 - `tools/check_disposable_compose.py` and `tools/tests/`: development-only Compose lint with synthetic safety regression checks, including image-digest support and a loopback-only WebUI. These cannot prove network isolation.
 - `docs/`: pinned compatibility hypotheses, safety boundaries, Portainer guide, experiment protocol and report template.
 
-No import execution, queue completion, or recovery implementation exists yet.
+No installable Crescendarr import executor, queue settlement, or recovery implementation exists yet. The native test fixture exercises stock Lidarr import on disposable synthetic files only.
 
 ## Running the disposable Portainer stack lint
 
