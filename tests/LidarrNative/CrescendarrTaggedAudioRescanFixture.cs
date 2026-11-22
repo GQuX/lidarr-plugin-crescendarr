@@ -59,6 +59,9 @@ namespace NzbDrone.Core.Test.MediaFiles
 
         public enum Scenario
         {
+            /// <summary>Baseline control: all twelve stock tracks and lyrics already registered; no unknown file.</summary>
+            CleanFullyLinkedBaseline,
+
             /// <summary>No import: track six simply has a valid, unregistered file. Proves a real decision is made.</summary>
             ControlUnlinkedValidFile,
 
@@ -72,6 +75,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             ScanInterleavedInsideImporter,
         }
 
+        [TestCase(Scenario.CleanFullyLinkedBaseline)]
         [TestCase(Scenario.ControlUnlinkedValidFile)]
         [TestCase(Scenario.RestoredOriginalBeforeFreshRow)]
         [TestCase(Scenario.IncomingTransferredButUnlinked)]
@@ -82,13 +86,41 @@ namespace NzbDrone.Core.Test.MediaFiles
             WireRealEventsAndStockDisk(w);
             var recorder = WireRealScan(w);
 
+            if (scenario == Scenario.CleanFullyLinkedBaseline)
+            {
+                // Causal control: same artist, album, tags, physical lyrics, event subscribers,
+                // scanner and real decision maker, but no unregistered audio file.
+                var originalLinks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber, t => t.TrackFileId);
+                var originalRows = Db.All<TrackFile>().Select(f => f.Id).OrderBy(id => id).ToArray();
+                var originalLyrics = Db.All<LyricFile>().ToDictionary(l => l.Id, l => l.TrackFileId);
+                var scan = RunRealScan(w, recorder, "fully-linked-baseline");
+                var finalLinks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber, t => t.TrackFileId);
+                var finalRows = Db.All<TrackFile>().Select(f => f.Id).OrderBy(id => id).ToArray();
+                var finalLyrics = Db.All<LyricFile>().ToDictionary(l => l.Id, l => l.TrackFileId);
+                var linksChanged = originalLinks.Any(p => !finalLinks.TryGetValue(p.Key, out var id) || id != p.Value);
+                var lyricLinksChanged = originalLyrics.Count != finalLyrics.Count ||
+                    originalLyrics.Any(p => !finalLyrics.TryGetValue(p.Key, out var id) || id != p.Value);
+                Log($"M14_TAGGED_CLEAN_BASELINE decisions={scan.Decisions.Count} approved={scan.Decisions.Count(d => d.Approved)} " +
+                    $"linksChanged={linksChanged} rowIdsChanged={!originalRows.SequenceEqual(finalRows)} " +
+                    $"lyricRowsChanged={lyricLinksChanged}");
+                CollectInvariants(w, scenario);
+                Assert.That(linksChanged, Is.False, "fully linked baseline unexpectedly changed Track links");
+                Assert.That(finalRows, Is.EqualTo(originalRows), "fully linked baseline unexpectedly changed TrackFile row IDs");
+                Assert.That(lyricLinksChanged, Is.False, "fully linked baseline unexpectedly changed LyricFile links");
+                foreach (var i in Enumerable.Range(1, Total))
+                    Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]),
+                        $"fully linked baseline unexpectedly modified physical lyric {i}");
+                AssertHeldInvariants(w, scenario);
+                return;
+            }
+
             if (scenario == Scenario.ControlUnlinkedValidFile)
             {
                 Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Sixth).TrackFileId, Is.EqualTo(0));
                 var controlScan = RunRealScan(w, recorder, "control");
                 AssertStockFullAlbumRescanCascade(w, controlScan, scenario);
                 AssertSixthLinkedAfterScan(w, Quality.MP3_192, w.OwnedBytes[Sixth]);
-                AssertHeldInvariants(w);
+                AssertHeldInvariants(w, scenario);
                 return;
             }
 
@@ -164,7 +196,7 @@ namespace NzbDrone.Core.Test.MediaFiles
                     break;
             }
 
-            AssertHeldInvariants(w);
+            AssertHeldInvariants(w, scenario);
         }
 
         /// <summary>
@@ -224,7 +256,7 @@ namespace NzbDrone.Core.Test.MediaFiles
         }
 
         /// <summary>Invariants that HELD in every characterized scenario.</summary>
-        private void AssertHeldInvariants(World w)
+        private void AssertHeldInvariants(World w, Scenario scenario)
         {
             Assert.That(File.ReadAllBytes(w.OwnedPaths[Total]), Is.EqualTo(w.OwnedBytes[Total]), "protected superior FLAC bytes unchanged");
             Assert.That(File.ReadAllBytes(w.IncomingPaths[Total]), Is.EqualTo(w.IncomingBytes[Total]), "rejected inferior candidate still staged");
@@ -237,7 +269,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(releases.Count(r => r.Monitored), Is.EqualTo(1));
             Assert.That(releases.Single(r => r.Monitored).ForeignReleaseId, Is.EqualTo(ReleaseMbid), "monitored MusicBrainz release unchanged");
             Assert.That(Db.All<TrackFile>().GroupBy(f => f.Path).Any(g => g.Count() > 1), Is.False, "stock schema keeps TrackFile paths unique");
-            _ = CollectInvariants(w, Scenario.ControlUnlinkedValidFile);
+            _ = CollectInvariants(w, scenario);
         }
 
         /// <summary>
@@ -272,7 +304,7 @@ namespace NzbDrone.Core.Test.MediaFiles
 
             Assert.That(Db.All<LyricFile>(), Is.Empty, "every lyric registration lost");
             Log("M14_TAGGED_INTERLEAVED: importer batch insert failed on UNIQUE(TrackFiles.Path); tracks 7-11 rows describe replaced originals; track 6 unlinked; no lyric rows");
-            AssertHeldInvariants(w);
+            AssertHeldInvariants(w, Scenario.ScanInterleavedInsideImporter);
         }
 
         // ------------------------------------------------------------------ world
