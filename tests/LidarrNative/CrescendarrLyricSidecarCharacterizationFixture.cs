@@ -1,6 +1,5 @@
 // Original, read-only Lidarr native behavior characterization for Crescendarr.
 // All filesystem, extra-file repository and recycle-bin effects are mocked.
-using System;
 using System.Collections.Generic;
 using System.IO;
 using Moq;
