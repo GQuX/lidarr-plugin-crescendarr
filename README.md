@@ -85,6 +85,10 @@ This is **not** the full native 12-track importer with actual disk mover. The fi
 
 This is **not** automatic journal-backed recovery or a true process crash. A separate [M13 journal implementation task](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/35) is underway in parallel; all experiments remain disposable and production is NO-GO.
 
+## Executable stock Lidarr edition preflight (read-only)
+
+The [M14 host preflight adapter](docs/compatibility/stock-edition-readonly-preflight.md) is source code using **real stock Lidarr album, release, and track repositories**. It checks that the monitored MusicBrainz edition and every incoming native import decision still match the approved album/release/track snapshot. It refuses ambiguous, changed, or unverified identities and stock CDH ON. Native disposable SQLite tests and pinned official binary ABI checks compile the same code. **No import execution, installer or safe journal-backed writer is provided yet.**
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
