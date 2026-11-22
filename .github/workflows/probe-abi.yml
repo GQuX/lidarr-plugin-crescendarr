@@ -1,0 +1,67 @@
+name: Stable Lidarr probe ABI (compile only)
+
+# Does not start Lidarr, install a plugin, mount media, connect to a NAS, or perform imports.
+# It only proves the test-only adapter can compile against a pinned upstream binary package.
+on:
+  push:
+    paths:
+      - 'src/Crescendarr.Lidarr.Probe/**'
+      - '.github/workflows/probe-abi.yml'
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Lidarr.Probe/**'
+      - '.github/workflows/probe-abi.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Download and verify pinned Lidarr 3.1.6.5079 Linux x64 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            --output "$archive" \
+            "https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz"
+          printf '%s  %s\n' 'fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc' "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/lidarr-runtime"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/lidarr-runtime"
+          echo "PINNED_RELEASE_SHA256_OK" >> "$GITHUB_STEP_SUMMARY"
+      - name: Discover host managed assemblies
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          core="$(find "${RUNNER_TEMP}/lidarr-runtime" -type f -name NzbDrone.Core.dll -print -quit)"
+          if [[ -z "$core" ]]; then
+            echo 'NzbDrone.Core.dll not found in pinned binary release. Inspect the published assembly names.' >&2
+            find "${RUNNER_TEMP}/lidarr-runtime" -type f -name '*.dll' | head -50 >&2
+            exit 1
+          fi
+          dir="$(dirname "$core")"
+          for name in NzbDrone.Common.dll NLog.dll System.IO.Abstractions.dll; do
+            if [[ ! -f "$dir/$name" ]]; then
+              echo "Required pinned host reference missing: $name" >&2
+              exit 1
+            fi
+          done
+          echo "bin=$dir" >> "$GITHUB_OUTPUT"
+      - name: Compile test-only adapter against pinned upstream binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build src/Crescendarr.Lidarr.Probe/Crescendarr.Lidarr.Probe.csproj \
+            --configuration Release --nologo \
+            -p:CrescendarrDisposableHostBuild=true \
+            -p:LidarrBinDir="${{ steps.locate.outputs.bin }}"
+          echo 'TEST-ONLY ABI COMPILE PASSED (NO LIDARR HOST EXECUTED)' >> "$GITHUB_STEP_SUMMARY"
