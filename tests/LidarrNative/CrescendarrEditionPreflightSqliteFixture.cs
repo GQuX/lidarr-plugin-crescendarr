@@ -1,6 +1,5 @@
 // Native preflight tests run ONLY in throwaway, SHA-pinned stock Lidarr Core.Test.
 // Real migrated SQLite Album/Release/Track repositories, no real download or import.
-using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -9,6 +8,7 @@ using Moq;
 using NUnit.Framework;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.DecisionEngine;
+using NzbDrone.Core.MediaFiles;
 using NzbDrone.Core.MediaFiles.TrackImport;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Parser.Model;
