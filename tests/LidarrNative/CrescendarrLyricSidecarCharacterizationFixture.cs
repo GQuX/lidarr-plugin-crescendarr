@@ -77,6 +77,24 @@ namespace NzbDrone.Core.Test.MediaFiles
         }
 
         [Test]
+        public void missing_from_disk_scan_cleanup_recycles_registered_lrc_and_unlinks_row()
+        {
+            // The stock media table scan uses DeleteMediaFileReason.MissingFromDisk.
+            // A scan during an unfinished swap can trigger this path.
+            var steps = new List<string>();
+            Mocker.GetMock<IRecycleBinProvider>()
+                .Setup(s => s.DeleteFile(_absoluteLyricPath, It.IsAny<string>()))
+                .Callback(() => steps.Add("recycle-registered-lyric"));
+            Mocker.GetMock<IExtraFileRepository<LyricFile>>()
+                .Setup(s => s.DeleteForTrackFile(_trackFile.Id))
+                .Callback(() => steps.Add("unlink-lyric-record"));
+
+            Subject.Handle(new TrackFileDeletedEvent(_trackFile, DeleteMediaFileReason.MissingFromDisk));
+
+            Assert.That(steps, Is.EqualTo(new[] { "recycle-registered-lyric", "unlink-lyric-record" }));
+        }
+
+        [Test]
         public void no_linked_tracks_cleanup_does_not_recycle_lrc_but_unlinks_database_row()
         {
             Subject.Handle(new TrackFileDeletedEvent(_trackFile, DeleteMediaFileReason.NoLinkedEpisodes));
