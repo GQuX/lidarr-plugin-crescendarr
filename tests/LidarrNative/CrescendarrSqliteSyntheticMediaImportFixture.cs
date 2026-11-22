@@ -49,6 +49,19 @@ namespace NzbDrone.Core.Test.MediaFiles
             RunSelectiveImport(failAtSix, preserveInterruptedCheckpoint: false, useStockDiskPipeline);
         }
 
+        // With two actual MusicBrainz editions in SQLite, demonstrate why an
+        // executor must independently pin the incoming release before passing
+        // approved tracks to stock ImportApprovedTracks. The stock importer itself
+        // does NOT preserve a previously selected release.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void native_stock_import_with_competing_editions_selects_the_incoming_release(bool incomingAlternateEdition)
+        {
+            RunSelectiveImport(failAtSix: false, preserveInterruptedCheckpoint: false,
+                useStockDiskPipeline: true, withCompetingEdition: true,
+                incomingAlternateEdition: incomingAlternateEdition);
+        }
+
         // Called only by an explicit, isolated CI step; never in the normal suite.
         // The source-pinned DbTest database is exported before its teardown and
         // checked in a different dotnet test process by the companion fixture.
@@ -60,7 +73,9 @@ namespace NzbDrone.Core.Test.MediaFiles
             RunSelectiveImport(failAtSix: true, preserveInterruptedCheckpoint: true);
         }
 
-        private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint, bool useStockDiskPipeline = false)
+        private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint,
+            bool useStockDiskPipeline = false, bool withCompetingEdition = false,
+            bool incomingAlternateEdition = false)
         {
             var restartRoot = Environment.GetEnvironmentVariable("CRESCENDARR_M12_RESTART_ROOT");
             if (preserveInterruptedCheckpoint)
@@ -127,7 +142,29 @@ namespace NzbDrone.Core.Test.MediaFiles
                 .Build();
             Db.Insert(release);
             release.Album = album;
-            album.AlbumReleases = new List<AlbumRelease> { release };
+            AlbumRelease alternateRelease = null;
+            if (withCompetingEdition)
+            {
+                // Different real MusicBrainz release UUID under the SAME album/group.
+                // The currently selected release is always the first one, until
+                // unmodified stock ImportApprovedTracks.SetMonitored changes it.
+                alternateRelease = Builder<AlbumRelease>.CreateNew()
+                    .With(x => x.Id = 0)
+                    .With(x => x.AlbumId = album.Id)
+                    .With(x => x.ForeignReleaseId = "65c9d81e-bcd2-4a9a-8be2-31c181fc23dd")
+                    .With(x => x.TrackCount = Total)
+                    .With(x => x.Monitored = false)
+                    .Build();
+                Db.Insert(alternateRelease);
+                alternateRelease.Album = album;
+            }
+
+            album.AlbumReleases = alternateRelease == null
+                ? new List<AlbumRelease> { release }
+                : new List<AlbumRelease> { release, alternateRelease };
+            Assert.That(Db.All<AlbumRelease>().Count, Is.EqualTo(withCompetingEdition ? 2 : 1));
+            Assert.That(Db.All<AlbumRelease>().Single(r => r.Id == release.Id).Monitored, Is.True,
+                "The selected edition starts as the original, not the alternate.");
 
             var decisions = new List<ImportDecision<LocalTrack>>();
             var previous = new Dictionary<int, TrackFile>();
@@ -207,7 +244,7 @@ namespace NzbDrone.Core.Test.MediaFiles
                 {
                     Artist = artist,
                     Album = album,
-                    Release = release,
+                    Release = incomingAlternateEdition ? alternateRelease : release,
                     Tracks = new List<Track> { track },
                     Path = incomingPath,
                     Size = incomingBytes[i].LongLength,
@@ -466,7 +503,19 @@ namespace NzbDrone.Core.Test.MediaFiles
             }
 
             Assert.That(Db.All<LyricFile>().Count, Is.EqualTo(Total));
-            Assert.That(Db.All<AlbumRelease>().Single(x => x.Id == release.Id).Monitored, Is.True);
+            var actualReleaseRows = Db.All<AlbumRelease>().ToDictionary(x => x.Id);
+            Assert.That(actualReleaseRows[release.Id].Monitored,
+                Is.EqualTo(!incomingAlternateEdition),
+                "Stock importer calls ReleaseService.SetMonitored on the first approved incoming release.");
+            if (withCompetingEdition)
+            {
+                Assert.That(actualReleaseRows[alternateRelease.Id].Monitored,
+                    Is.EqualTo(incomingAlternateEdition),
+                    "The competing edition must be updated in real SQLite.");
+                Assert.That(actualReleaseRows.Values.Count(x => x.Monitored), Is.EqualTo(1),
+                    "Stock SetMonitored always leaves one monitored edition.");
+            }
+
             Assert.That(Db.All<Track>().All(x => storedFiles.ContainsKey(x.TrackFileId)), Is.True);
             if (!useStockDiskPipeline)
             {
