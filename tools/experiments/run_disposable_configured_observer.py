@@ -203,6 +203,45 @@ def main() -> int:
                 except (ProcessLookupError, subprocess.TimeoutExpired):
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait(timeout=8)
+
+        # Safety fallback experiment: remove the observer and restart the SAME
+        # disposable Lidarr appdata. The CDH OFF setting must persist even with
+        # zero Crescendarr plugins. This cannot prove what a real SAB queue does.
+        shutil.rmtree(plugin_dir)
+        restart_log = base / "no-observer-restart.log"
+        fallback_proc = None
+        try:
+            clean_env = {k: v for k, v in env.items() if not k.startswith("CRESCENDARR_OBSERVER_")}
+            with restart_log.open("w", encoding="utf-8") as output:
+                fallback_proc = subprocess.Popen(
+                    [str(bin_dir / "Lidarr"), f"-data={data}", "-nobrowser", "-exitimmediately"],
+                    cwd=bin_dir, stdout=output, stderr=subprocess.STDOUT,
+                    env=clean_env, start_new_session=True,
+                )
+                wait_for_server(PORT, fallback_proc)
+                fallback_key = get_key(data)
+                assert request(fallback_key, "config/downloadclient")["enableCompletedDownloadHandling"] is False, (
+                    "CDH OFF did not persist after uninstall and restart"
+                )
+                remaining = request(fallback_key, "downloadclient")
+                assert len([item for item in remaining if item.get("name") == NAME]) == 1, (
+                    "Configured stock client unexpectedly disappeared on plugin uninstall"
+                )
+                assert lyric.read_bytes() == original_bytes, "Synthetic lyric changed on restart without observer"
+                assert sorted(p.name for p in album.iterdir()) == [lyric.name]
+                assert "CRESCENDARR_OBSERVER_READY" not in restart_log.read_text(
+                    encoding="utf-8", errors="replace"
+                ), "Observer unexpectedly loaded after its plugin directory was removed"
+                print("DISPOSABLE_CDH_OFF_PLUGIN_ABSENT_RESTART_OK")
+                print("Native CDH remained OFF, built-in provider persisted, and synthetic lyric survived.")
+        finally:
+            if fallback_proc is not None and fallback_proc.poll() is None:
+                try:
+                    os.killpg(fallback_proc.pid, signal.SIGTERM)
+                    fallback_proc.wait(timeout=12)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    os.killpg(fallback_proc.pid, signal.SIGKILL)
+                    fallback_proc.wait(timeout=8)
     return 0
 
 
