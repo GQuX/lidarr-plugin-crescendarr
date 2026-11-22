@@ -75,6 +75,11 @@ class Host:
     def text(self) -> str:
         return self.log.read_text(encoding="utf-8", errors="replace")
 
+    def host_log(self) -> str:
+        """Stock NLog file target; stock messages are not written to stdout on this runner."""
+        path = self.data / "logs" / "lidarr.txt"
+        return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+
     def wait_ready(self, marker: str, deadline: float = 120) -> None:
         limit = time.monotonic() + deadline
         while time.monotonic() < limit:
@@ -241,8 +246,11 @@ def run_queue(bin_dir: Path, plugin_dll: Path, base: Path) -> None:
         check(status(host.wait_status(pushed_id, {"completed"})) == "completed",
               "command pushed by the plugin through IManageCommandQueue ran on the stock executor")
         time.sleep(2)
-        note(f"OBSERVED plugin-pushed executions={host.text().count('START label=plugin-pushed ')} "
+        starts = re.findall(r"thread=\d+ START label=plugin-pushed [^\n]*", host.text())
+        note(f"OBSERVED plugin-pushed executions={len(starts)} pushedId={pushed_id} "
              "(startup push races the stock ApplicationStartedEvent requeue)")
+        for line in starts:
+            note("OBSERVED " + line[:400])
 
         quality = host.api("GET", "qualityprofile")[0]["id"]
         metadata = host.api("GET", "metadataprofile")[0]["id"]
@@ -273,7 +281,7 @@ def run_queue(bin_dir: Path, plugin_dll: Path, base: Path) -> None:
               "direct IDiskScanService.Scan completed WHILE the plugin disk-access command was Started")
         check(f"RescanFolders#{scan['id']}:Queued:disk=True" in direct_end,
               "...and while the queued stock RescanFolders was still waiting")
-        check(re.search(r"Scanning " + re.escape(str(library)), host.text()) is not None,
+        check(re.search(r"Scanning " + re.escape(str(library)), host.host_log()) is not None,
               "the stock scanner actually ran its folder scan for the direct call")
         check(status(host.get(scan["id"])) == "queued", "queued stock scan still waiting after the direct scan")
 
@@ -407,7 +415,7 @@ def main() -> int:
         print(f"M16_QUEUE_EXPERIMENT_FAILED: {failure}", file=sys.stderr)
         return 1
     finally:
-        for log in sorted(base.glob("*.log")):
+        for log in sorted(list(base.glob("*.log")) + list(base.glob("config/logs/lidarr*.txt"))):
             print(f"=== {log.name}: CRESCENDARR / command / scan lines ===")
             for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
                 if any(k in line for k in ("CRESCENDARR", "Scanning", "Exception", "Error", "Unknown command", "Orphan", "plugin")):
