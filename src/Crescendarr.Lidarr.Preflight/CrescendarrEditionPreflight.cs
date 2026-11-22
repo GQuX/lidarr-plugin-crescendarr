@@ -106,7 +106,7 @@ namespace NzbDrone.Core.MediaFiles.TrackImport
                 if (releases == null || releases.Count == 0)
                     return Block(CrescendarrEditionPreflightReason.MonitoredReleaseAmbiguous);
 
-                AlbumRelease selected = null;
+                AlbumRelease selected = null!;
                 var releaseIds = new HashSet<int>();
                 foreach (var release in releases)
                 {
