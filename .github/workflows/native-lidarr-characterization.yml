@@ -1,4 +1,4 @@
-name: Native Lidarr 12-track characterization
+name: Native Lidarr safety characterization
 
 # Loads ORIGINAL Lidarr v3.1.6.5079 source in an ephemeral runner.
 # Only copies our test fixture into temporary checkout: no upstream repo writes.
@@ -52,7 +52,7 @@ jobs:
       # characterization before compilation. Disabling audit applies ONLY to this
       # ephemeral historical-source test and does not change package versions.
       # Never interpret this as production dependency safety.
-      - name: Execute native importer + quality specification fixture (no actual media)
+      - name: Run native importer, lyrics, completion and failure fixtures (all mocked)
         shell: bash
         run: |
           set -euo pipefail
@@ -62,4 +62,4 @@ jobs:
             --logger 'console;verbosity=normal' \
             -p:EnableAnalyzers=false \
             -p:NuGetAudit=false
-          echo "Native importer and upgrader fault characterization PASSED in a clean source checkout" >> "$GITHUB_STEP_SUMMARY"
+          echo "Native importer, lyric, download-completion and fault characterization PASSED in clean source checkout (mocked external effects)" >> "$GITHUB_STEP_SUMMARY"
