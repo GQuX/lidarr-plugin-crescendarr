@@ -24,10 +24,14 @@ using NzbDrone.Core.MediaFiles.TrackImport;
 using NzbDrone.Core.MediaFiles.TrackImport.Specifications;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Parser.Model;
+using NzbDrone.Core.Organizer;
+using NzbDrone.Core.RootFolders;
 using NzbDrone.Core.Profiles.Qualities;
 using NzbDrone.Core.Qualities;
 using NzbDrone.Core.Test.Framework;
+using NzbDrone.Mono.Disk;
 using NzbDrone.Test.Common;
+using NzbDrone.Test.Common.AutoMoq;
 
 namespace NzbDrone.Core.Test.MediaFiles
 {
@@ -37,11 +41,12 @@ namespace NzbDrone.Core.Test.MediaFiles
         private const int Total = 12;
         private const int Upgrades = 11;
 
-        [TestCase(false)]
-        [TestCase(true)]
-        public void native_selective_import_relinks_real_sqlite_and_preserves_protected_bytes_and_lyrics(bool failAtSix)
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        public void native_selective_import_relinks_real_sqlite_and_preserves_protected_bytes_and_lyrics(bool failAtSix, bool useStockDiskPipeline)
         {
-            RunSelectiveImport(failAtSix, preserveInterruptedCheckpoint: false);
+            RunSelectiveImport(failAtSix, preserveInterruptedCheckpoint: false, useStockDiskPipeline);
         }
 
         // Called only by an explicit, isolated CI step; never in the normal suite.
@@ -55,7 +60,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             RunSelectiveImport(failAtSix: true, preserveInterruptedCheckpoint: true);
         }
 
-        private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint)
+        private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint, bool useStockDiskPipeline = false)
         {
             var restartRoot = Environment.GetEnvironmentVariable("CRESCENDARR_M12_RESTART_ROOT");
             if (preserveInterruptedCheckpoint)
@@ -227,39 +232,74 @@ namespace NzbDrone.Core.Test.MediaFiles
             Mocker.SetConstant<ITrackService>(Mocker.Resolve<TrackService>());
             Mocker.SetConstant<IReleaseService>(Mocker.Resolve<ReleaseService>());
 
-            Mocker.GetMock<IDiskProvider>()
-                .Setup(x => x.GetParentFolder(It.IsAny<string>()))
-                .Returns<string>(Path.GetDirectoryName);
-            Mocker.GetMock<IDiskProvider>()
-                .Setup(x => x.FileExists(It.IsAny<string>()))
-                .Returns<string>(File.Exists);
-            Mocker.GetMock<IDiskProvider>()
-                .Setup(x => x.FolderExists(It.IsAny<string>()))
-                .Returns<string>(Directory.Exists);
+            if (useStockDiskPipeline)
+            {
+                // Unlike the prior 12-track fixture, the selected path now uses
+                // unmodified native Linux disk, mount and symlink services, the
+                // real stock recycler and the real native track-file mover.
+                // Naming/root/script/permissions remain controlled test inputs.
+                Assert.That(failAtSix, Is.False, "Fault injection is a separate stage.");
+                Mocker.SetConstant<IProcMountProvider>(Mocker.Resolve<ProcMountProvider>());
+                Mocker.SetConstant<ISymbolicLinkResolver>(Mocker.Resolve<SymbolicLinkResolver>());
+                Mocker.SetConstant<IDiskProvider>(Mocker.Resolve<IDiskProvider>(FileSystemType.Actual));
+                Mocker.SetConstant<IDiskTransferService>(Mocker.Resolve<DiskTransferService>());
+                Mocker.GetMock<IConfigService>()
+                    .SetupGet(x => x.RecycleBin)
+                    .Returns(recycle);
+                Mocker.SetConstant<IRecycleBinProvider>(Mocker.Resolve<RecycleBinProvider>());
+                Mocker.GetMock<IBuildFileNames>()
+                    .Setup(x => x.BuildTrackFilePath(
+                        It.IsAny<List<Track>>(), It.IsAny<Artist>(), It.IsAny<Album>(),
+                        It.IsAny<TrackFile>(), It.IsAny<string>(),
+                        It.IsAny<NamingConfig>(), It.IsAny<List<CustomFormat>>()))
+                    .Returns((List<Track> tracks, Artist unusedArtist, Album unusedAlbum,
+                        TrackFile unusedFile, string unusedExt, NamingConfig unusedName,
+                        List<CustomFormat> unusedFormats) =>
+                            physicalPaths[tracks.Single().AbsoluteTrackNumber]);
+                Mocker.GetMock<IRootFolderService>()
+                    .Setup(x => x.GetBestRootFolder(It.IsAny<string>()))
+                    .Returns(new RootFolder { Path = Path.Combine(temp, "library") });
+                Mocker.GetMock<IImportScript>()
+                    .Setup(x => x.TryImport(
+                        It.IsAny<string>(), It.IsAny<string>(), It.IsAny<LocalTrack>(),
+                        It.IsAny<TrackFile>(), It.IsAny<TransferMode>(), null))
+                    .Returns(ScriptImportDecision.DeferMove);
+                Mocker.SetConstant<IMoveTrackFiles>(Mocker.Resolve<TrackFileMovingService>());
+            }
+            else
+            {
+                // Legacy test-controlled transfer and recycle callbacks are kept
+                // for precise post-delete sixth-transfer fault injection.
+                Mocker.GetMock<IDiskProvider>()
+                    .Setup(x => x.GetParentFolder(It.IsAny<string>()))
+                    .Returns<string>(Path.GetDirectoryName);
+                Mocker.GetMock<IDiskProvider>()
+                    .Setup(x => x.FileExists(It.IsAny<string>()))
+                    .Returns<string>(File.Exists);
+                Mocker.GetMock<IDiskProvider>()
+                    .Setup(x => x.FolderExists(It.IsAny<string>()))
+                    .Returns<string>(Directory.Exists);
 
-            // Real disposable byte moves; these delegates DO NOT test the stock
-            // RecycleBinProvider/TrackFileMovingService implementations.
-            Mocker.GetMock<IRecycleBinProvider>()
-                .Setup(x => x.DeleteFile(It.IsAny<string>(), It.IsAny<string>()))
-                .Callback<string, string>((path, subfolder) =>
-                    File.Move(path, Path.Combine(recycle, Path.GetFileName(path))));
-            Mocker.GetMock<IMoveTrackFiles>()
-                .Setup(x => x.MoveTrackFile(It.IsAny<TrackFile>(), It.IsAny<LocalTrack>()))
-                .Returns((TrackFile file, LocalTrack local) =>
-                {
-                    var trackNumber = local.Tracks.Single().AbsoluteTrackNumber;
-                    // The sixth original has already been recycled and its native SQLite
-                    // TrackFile row deleted. Inject failure before moving incoming bytes.
-                    if (failAtSix && trackNumber == 6)
+                Mocker.GetMock<IRecycleBinProvider>()
+                    .Setup(x => x.DeleteFile(It.IsAny<string>(), It.IsAny<string>()))
+                    .Callback<string, string>((path, subfolder) =>
+                        File.Move(path, Path.Combine(recycle, Path.GetFileName(path))));
+                Mocker.GetMock<IMoveTrackFiles>()
+                    .Setup(x => x.MoveTrackFile(It.IsAny<TrackFile>(), It.IsAny<LocalTrack>()))
+                    .Returns((TrackFile file, LocalTrack local) =>
                     {
-                        throw new IOException("SYNTHETIC: sixth file transfer failed after native old-row deletion");
-                    }
+                        var trackNumber = local.Tracks.Single().AbsoluteTrackNumber;
+                        if (failAtSix && trackNumber == 6)
+                        {
+                            throw new IOException("SYNTHETIC: sixth file transfer failed after native old-row deletion");
+                        }
 
-                    var destination = physicalPaths[trackNumber];
-                    File.Move(file.Path, destination);
-                    file.Path = destination;
-                    return file;
-                });
+                        var destination = physicalPaths[trackNumber];
+                        File.Move(file.Path, destination);
+                        file.Path = destination;
+                        return file;
+                    });
+            }
 
             Mocker.GetMock<IAlbumService>()
                 .Setup(x => x.GetAlbum(album.Id))
@@ -405,8 +445,10 @@ namespace NzbDrone.Core.Test.MediaFiles
                 else
                 {
                     Assert.That(File.ReadAllBytes(physicalPaths[i]), Is.EqualTo(incomingBytes[i]));
-                    Assert.That(File.ReadAllBytes(Path.Combine(recycle, Path.GetFileName(physicalPaths[i]))),
-                        Is.EqualTo(oldBytes[i]));
+                    var recycled = useStockDiskPipeline
+                        ? Path.Combine(recycle, "synthetic-artist", "synthetic-album", Path.GetFileName(physicalPaths[i]))
+                        : Path.Combine(recycle, Path.GetFileName(physicalPaths[i]));
+                    Assert.That(File.ReadAllBytes(recycled), Is.EqualTo(oldBytes[i]));
                     Assert.That(storedTracks[i].TrackFileId, Is.Not.EqualTo(previous[i].Id));
                     Assert.That(storedFiles.ContainsKey(previous[i].Id), Is.False);
                     Assert.That(storedFiles.ContainsKey(storedTracks[i].TrackFileId), Is.True);
@@ -426,8 +468,11 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(Db.All<LyricFile>().Count, Is.EqualTo(Total));
             Assert.That(Db.All<AlbumRelease>().Single(x => x.Id == release.Id).Monitored, Is.True);
             Assert.That(Db.All<Track>().All(x => storedFiles.ContainsKey(x.TrackFileId)), Is.True);
-            Mocker.GetMock<IRecycleBinProvider>()
-                .Verify(x => x.DeleteFile(physicalPaths[Total], It.IsAny<string>()), Times.Never());
+            if (!useStockDiskPipeline)
+            {
+                Mocker.GetMock<IRecycleBinProvider>()
+                    .Verify(x => x.DeleteFile(physicalPaths[Total], It.IsAny<string>()), Times.Never());
+            }
         }
     }
 }
