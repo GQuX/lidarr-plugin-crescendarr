@@ -44,6 +44,7 @@ internal static class Program
             ("X03 Review B: duplicate or case-variant rows at a bound path, or a shared original file, never reach a destructive step", DuplicatePathRows),
             ("X04 Review C: physical lyric path that is not artist root + registered relative path fails closed", LyricIdentityMismatch),
             ("X05 Broader: hardlink planted at the backup path cannot destroy the original", HardlinkedBackupPath),
+            ("X06 Review 2: a fresh row created by the operation shared with another track blocks; unrelated sharing does not", SharedFreshTrackFile),
             ("K01 SIGKILL a separate process between local writes; a new process reconciles and recovers", KillAndReopen),
         };
 
@@ -967,6 +968,99 @@ internal static class Program
             Eq(OperationStatus.Completed, report.Status, "operation completes after the planted link is replaced");
             NoViolations(lab, baseline, "after hardlinked backup path");
         });
+    }
+
+    /// <summary>
+    /// Second review: a FRESH destination row created by the operation must not be shared with any other
+    /// track (interrupted-native state and already-upgraded state), while a shared file that the operation
+    /// never touches stays legitimate.
+    /// </summary>
+    private static void SharedFreshTrackFile()
+    {
+        void LinkProtectedTo(string lab, int trackFileId)
+        {
+            var host = new FakeHost(lab);
+            var s = host.Load();
+            s.Tracks = s.Tracks.Select(t => t.TrackId == LabScenario.ProtectedTrackId ? t with { TrackFileId = trackFileId } : t).ToList();
+            host.Save(s, "test.shareFresh");
+        }
+
+        int FreshRowOf(string lab, int trackId) => new FakeHost(lab).Load().Tracks.Single(t => t.TrackId == trackId).TrackFileId;
+
+        var failures = new List<string>();
+        void Case(string name, Action run)
+        {
+            try { run(); Console.WriteLine($"  X06 {name}: ok"); }
+            catch (Exception error) { failures.Add($"{name}: {error.Message}"); Console.WriteLine($"  X06 {name}: FAILED {error.Message}"); }
+        }
+
+        string[] LaterSteps(ExecutorReport report) => report.Executed
+            .Where(e => e.StartsWith("RecordStepDone", StringComparison.Ordinal) || e.StartsWith("RelinkLyric", StringComparison.Ordinal) ||
+                        e.StartsWith("InvokeNativeUpgrade", StringComparison.Ordinal) || e.StartsWith("DetachLyric", StringComparison.Ordinal) ||
+                        e.StartsWith("CompleteOperation", StringComparison.Ordinal) || e.StartsWith("Insert", StringComparison.Ordinal))
+            .ToArray();
+
+        // 1. Interrupted native step: the host already linked track 101 to its fresh row, the journal has not recorded it.
+        Case("case 1 interrupted native", () => WithLab((lab, baseline) =>
+        {
+            Faults.Arm("crash", "native.101.afterLink");
+            _ = RunCatching(() => Lab.Run(lab));
+            Faults.Arm(null, null);
+            var fresh = FreshRowOf(lab, 101);
+            True(fresh >= 900, "track 101 linked to a fresh row before the crash");
+            LinkProtectedTo(lab, fresh);
+            var lyrics = new FakeHost(lab).Load().Lyrics.Count;
+            var report = Lab.Recover(lab, approve: true);
+            Eq(Verdict.RequiresReview, report.FinalVerdict, "fresh row shared with the protected track (interrupted native)");
+            Eq(0, LaterSteps(report).Length, "later steps ran while the fresh row was shared: " + string.Join(",", report.Executed));
+            Eq(lyrics, new FakeHost(lab).Load().Lyrics.Count, "no lyric row inserted");
+            Eq(OperationStatus.RequiresReview, Lab.Open(lab).Manifest.Status, "journal recorded review");
+        }));
+
+        // 2. Already upgraded: the journal recorded the fresh ID, the next step would be the lyric relink.
+        Case("case 2 upgraded", () => WithLab((lab, baseline) =>
+        {
+            Faults.Arm("crash", "native.101.afterPublish");
+            _ = RunCatching(() => Lab.Run(lab));
+            Faults.Arm(null, null);
+            var recorded = Lab.Open(lab).Manifest.ProgressFor(101).NewTrackFileId!.Value;
+            LinkProtectedTo(lab, recorded);
+            var lyrics = new FakeHost(lab).Load().Lyrics.Count;
+            var report = Lab.Recover(lab, approve: true);
+            Eq(Verdict.RequiresReview, report.FinalVerdict, "fresh row shared with the protected track (upgraded)");
+            Eq(0, LaterSteps(report).Length, "later steps ran while the recorded fresh row was shared: " + string.Join(",", report.Executed));
+            Eq(lyrics, new FakeHost(lab).Load().Lyrics.Count, "no lyric row inserted");
+        }));
+
+        // 3. Two bound tracks claiming the same fresh row (track 102 linked to 101's fresh row after 101 upgraded).
+        Case("case 3 extra track on fresh row", () => WithLab((lab, baseline) =>
+        {
+            Faults.Arm("crash", "native.101.afterPublish");
+            _ = RunCatching(() => Lab.Run(lab));
+            Faults.Arm(null, null);
+            var recorded = Lab.Open(lab).Manifest.ProgressFor(101).NewTrackFileId!.Value;
+            var host = new FakeHost(lab);
+            var s = host.Load();
+            s.Tracks.Add(new HostTrack(198, LabScenario.RecordingMbid(198), recorded));
+            host.Save(s, "test.extraShare");
+            var report = Lab.Recover(lab, approve: true);
+            Eq(Verdict.RequiresReview, report.FinalVerdict, "fresh row shared with an extra unbound track");
+            Eq(0, LaterSteps(report).Length, "later steps ran with an extra track on the fresh row");
+        }));
+
+        // 4. Legitimate sharing that the operation never touches (two unbound tracks on the protected file) still completes.
+        Case("case 4 legitimate unrelated sharing", () => WithLab((lab, baseline) =>
+        {
+            var host = new FakeHost(lab);
+            var s = host.Load();
+            s.Tracks.Add(new HostTrack(199, LabScenario.RecordingMbid(199), baseline.ProtectedTrackFileId));
+            host.Save(s, "test.legitShare");
+            var report = Lab.Run(lab);
+            Eq(OperationStatus.Completed, report.Status, "unrelated shared file must not block the operation");
+            NoViolations(lab, baseline, "after operation beside a legitimately shared unrelated file");
+        }));
+
+        True(failures.Count == 0, string.Join(" | ", failures));
     }
 
     // ---------- K: real process kill ----------
