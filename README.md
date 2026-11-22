@@ -19,6 +19,12 @@ An independent review, followed by [Lidarr source verification](docs/reviews/202
 
 **Do not pursue IDownloadedTracksImportService as a write-enabled release mechanism.** The current probe characterizes disposable-host dependency injection only. Priority is [native import characterization (#6)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/6), [completion/lyrics/recovery (#7)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/7), and upstream compatibility with [PR #6166](https://github.com/Lidarr/Lidarr/pull/6166). The single-plugin goal is conditional on a safe host integration point. Our [independently reviewed incremental import proposal v0.2](docs/architecture/host-selective-import-incremental-v0.2.md) replaces the overlarge [v0.1 draft](docs/architecture/host-recoverable-import-protocol-v0.1.md). Both are **unimplemented** and require upstream Lidarr changes; safe standalone production operation remains unavailable.
 
+## Stock-Lidarr read-only observer milestone
+
+The [disposable stock host test](docs/compatibility/stock-lidarr-readonly-observer-evidence.md) loaded a **separate, read-only** observer plugin that resolved Lidarr's configured download-client factory with **no importer overrides**. A [26/26 passing native NUnit suite](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45031455402) separately verified that Lidarr's monitor still reads completed downloads from its configured client even with Completed Download Handling OFF, before filtering them from the stock queue.
+
+**These are two separate proofs**, not a functioning plugin-managed download queue. The real host had zero configured clients; the native client had a mocked completed item. No actual audio or user downloader was accessed.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
