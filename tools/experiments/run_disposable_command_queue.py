@@ -281,7 +281,13 @@ def run_queue(bin_dir: Path, plugin_dll: Path, base: Path) -> None:
               "direct IDiskScanService.Scan completed WHILE the plugin disk-access command was Started")
         check(f"RescanFolders#{scan['id']}:Queued:disk=True" in direct_end,
               "...and while the queued stock RescanFolders was still waiting")
-        check(re.search(r"Scanning " + re.escape(str(library)), host.host_log()) is not None,
+        scan_seen = False
+        for _ in range(100):
+            scan_seen = re.search(r"Scanning " + re.escape(str(library)), host.host_log()) is not None
+            if scan_seen:
+                break
+            time.sleep(0.1)
+        check(scan_seen,
               "the stock scanner actually ran its folder scan for the direct call")
         check(status(host.get(scan["id"])) == "queued", "queued stock scan still waiting after the direct scan")
 
