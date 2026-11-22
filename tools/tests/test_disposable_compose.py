@@ -74,6 +74,26 @@ class DisposableComposeTests(unittest.TestCase):
         self.service(obj)["image"] = "lscr.io/linuxserver/lidarr:nightly"
         self.assertTrue(module.check_compose(obj))
 
+    def test_pinned_official_image_digest_is_accepted(self):
+        obj = deepcopy(GOOD)
+        self.service(obj)["image"] = "lscr.io/linuxserver/lidarr@sha256:" + "a" * 64
+        self.assertEqual([], module.check_compose(obj))
+
+    def test_malformed_image_digest_is_rejected(self):
+        obj = deepcopy(GOOD)
+        self.service(obj)["image"] = "lscr.io/linuxserver/lidarr@sha256:BADHASH"
+        self.assertTrue(module.check_compose(obj))
+
+    def test_non_official_digest_is_rejected(self):
+        obj = deepcopy(GOOD)
+        self.service(obj)["image"] = "example.com/lidarr@sha256:" + "a" * 64
+        self.assertTrue(module.check_compose(obj))
+
+    def test_lan_webui_publication_is_rejected(self):
+        obj = deepcopy(GOOD)
+        self.service(obj)["ports"] = ["8687:8686"]
+        self.assertTrue(module.check_compose(obj))
+
     def test_watchtower_label_missing_is_rejected(self):
         obj = deepcopy(GOOD)
         self.service(obj).pop("labels")
