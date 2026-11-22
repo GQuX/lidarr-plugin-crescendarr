@@ -44,8 +44,8 @@ jobs:
           set -euo pipefail
           core="$(find "${RUNNER_TEMP}/lidarr-runtime" -type f -name Lidarr.Core.dll -print -quit)"
           if [[ -z "$core" ]]; then
-            echo 'NzbDrone.Core.dll not found in pinned binary release. Inspect the published assembly names.' >&2
-            find "${RUNNER_TEMP}/lidarr-runtime" -type f \\( -name 'Lidarr*.dll' -o -name 'NzbDrone*.dll' \\) >&2 || true
+            echo 'Lidarr.Core.dll not found in pinned binary release. Inspect the published assembly names.' >&2
+            find "${RUNNER_TEMP}/lidarr-runtime" -type f -iname "lidarr*.dll" >&2 || true
             exit 1
           fi
           dir="$(dirname "$core")"
