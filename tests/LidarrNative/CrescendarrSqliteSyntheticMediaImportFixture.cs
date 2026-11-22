@@ -5,8 +5,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Data.SQLite;
 using System.Linq;
 using System.Text;
+using System.Security.Cryptography;
 using FizzWare.NBuilder;
 using Moq;
 using NUnit.Framework;
@@ -39,7 +41,35 @@ namespace NzbDrone.Core.Test.MediaFiles
         [TestCase(true)]
         public void native_selective_import_relinks_real_sqlite_and_preserves_protected_bytes_and_lyrics(bool failAtSix)
         {
-            var temp = Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m12-disposable");
+            RunSelectiveImport(failAtSix, preserveInterruptedCheckpoint: false);
+        }
+
+        // Called only by an explicit, isolated CI step; never in the normal suite.
+        // The source-pinned DbTest database is exported before its teardown and
+        // checked in a different dotnet test process by the companion fixture.
+        [Test]
+        public void produce_sixth_file_interruption_checkpoint_for_new_process()
+        {
+            Assert.That(Environment.GetEnvironmentVariable("CRESCENDARR_M12_PHASE"),
+                Is.EqualTo("prepare"), "Separate CI phase must opt in explicitly.");
+            RunSelectiveImport(failAtSix: true, preserveInterruptedCheckpoint: true);
+        }
+
+        private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint)
+        {
+            var restartRoot = Environment.GetEnvironmentVariable("CRESCENDARR_M12_RESTART_ROOT");
+            if (preserveInterruptedCheckpoint)
+            {
+                Assert.That(restartRoot, Is.Not.Null.And.Not.Empty);
+                Assert.That(Path.IsPathFullyQualified(restartRoot), Is.True);
+                Assert.That(Path.GetFileName(restartRoot).StartsWith("crescendarr-m12-restart-"), Is.True);
+                Assert.That(Directory.Exists(restartRoot), Is.False,
+                    "Refuse to overwrite a prior restart checkpoint.");
+                Directory.CreateDirectory(restartRoot);
+            }
+            var temp = preserveInterruptedCheckpoint
+                ? Path.Combine(restartRoot, "owned")
+                : Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m12-disposable");
             var library = Path.Combine(temp, "library", "synthetic-artist", "synthetic-album");
             var staging = Path.Combine(temp, "staging");
             var recycle = Path.Combine(temp, "synthetic-recycle");
@@ -275,6 +305,37 @@ namespace NzbDrone.Core.Test.MediaFiles
                     Is.EqualTo(oldBytes[6]));
                 Assert.That(Db.All<LyricFile>().Any(x => x.TrackFileId == previous[6].Id), Is.False);
                 Assert.That(File.ReadAllBytes(lyricPaths[6]), Is.EqualTo(lyricBytes[6]));
+
+                if (preserveInterruptedCheckpoint)
+                {
+                    // Live SQLite online backup produces a self-contained snapshot
+                    // that survives DbTest teardown and is reopened by another
+                    // dotnet test process. No native files are touched outside the
+                    // dedicated GitHub runner temporary path.
+                    var snapshot = Path.Combine(restartRoot, "interrupted-lidarr.db");
+                    using (var sourceConnection = (SQLiteConnection)Db.OpenConnection())
+                    using (var targetConnection = new SQLiteConnection(
+                        "Data Source=" + snapshot + ";Version=3;"))
+                    {
+                        targetConnection.Open();
+                        sourceConnection.BackupDatabase(targetConnection, "main", "main", -1, null, 0);
+                    }
+
+                    // Write the ready marker LAST, after verifying backup bytes
+                    // and a structurally readable SQLite snapshot.
+                    var expected = Convert.ToHexString(SHA256.HashData(oldBytes[6]));
+                    using (var probe = new SQLiteConnection("Data Source=" + snapshot + ";Version=3;"))
+                    {
+                        probe.Open();
+                        using var query = new SQLiteCommand("PRAGMA integrity_check", probe);
+                        Assert.That(query.ExecuteScalar()?.ToString(), Is.EqualTo("ok"));
+                    }
+
+                    File.WriteAllText(Path.Combine(restartRoot, "sixth-original.sha256"), expected);
+                    File.WriteAllText(Path.Combine(restartRoot, "ready.marker"), "M12_INTERRUPTED_AT_SIX");
+                    Assert.That(File.Exists(snapshot), Is.True);
+                    return;
+                }
 
                 // In-process TEST RECOVERY, not an implemented Crescendarr journal:
                 // copy from a separately verified operation-owned backup, then insert
