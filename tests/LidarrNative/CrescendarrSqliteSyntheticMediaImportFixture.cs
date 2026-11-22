@@ -581,7 +581,9 @@ namespace NzbDrone.Core.Test.MediaFiles
                         "Stock rescan switched the selected MusicBrainz release.");
                     TestContext.Progress.WriteLine(
                         "M14_SCAN_OBSERVED: real DiskScanService.Scan reached its decision stage; " +
-                        "opaque-media decisions suppressed; sixth remains missing/orphaned, staged bytes intact, " +
+                        "opaque-media decisions suppressed; sixth remains missing/" +
+                        (realEventsDuringImport ? "unlinked by stock event" : "orphaned nonzero file ID") +
+                        ", staged bytes intact, " +
                         "track-file IDs, track associations, lyrics and monitored release unchanged.");
 
                     // The existing test-only repair below is still performed and validated.
