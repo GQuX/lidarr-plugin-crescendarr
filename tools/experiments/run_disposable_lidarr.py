@@ -40,8 +40,11 @@ def healthy_local_server(port: int) -> bool:
 
 def main() -> int:
     root = require_ci()
-    if len(sys.argv) != 3:
-        raise ValueError("Usage: run_disposable_lidarr.py <pinned-lidarr-bin> <compiled-probe-dll>")
+    if len(sys.argv) not in (3, 4):
+        raise ValueError("Usage: run_disposable_lidarr.py <pinned-lidarr-bin> <compiled-probe-dll> [probe|baseline|guard-negative]")
+    mode = sys.argv[3] if len(sys.argv) == 4 else "probe"
+    if mode not in ("probe", "baseline", "guard-negative"):
+        raise ValueError("Unknown disposable test mode.")
     bin_dir = Path(sys.argv[1]).resolve(strict=True)
     plugin_dll = Path(sys.argv[2]).resolve(strict=True)
 
@@ -65,11 +68,12 @@ def main() -> int:
         # Confirm the auto-discovery pattern from Lidarr v3.1.6.5079's PathExtensions:
         # data/plugins/<owner>/<name>/Lidarr.Plugin.*.dll
         plugin_dir = data / "plugins" / "GQuX" / "CrescendarrProbe"
-        plugin_dir.mkdir(parents=True)
-        shutil.copyfile(plugin_dll, plugin_dir / plugin_dll.name)
-        deps = plugin_dll.with_suffix(".deps.json")
-        if deps.is_file():
-            shutil.copyfile(deps, plugin_dir / deps.name)
+        if mode != "baseline":
+            plugin_dir.mkdir(parents=True)
+            shutil.copyfile(plugin_dll, plugin_dir / plugin_dll.name)
+            deps = plugin_dll.with_suffix(".deps.json")
+            if deps.is_file():
+                shutil.copyfile(deps, plugin_dir / deps.name)
 
         environment = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -80,12 +84,17 @@ def main() -> int:
             "DOTNET_ROOT": os.environ.get("DOTNET_ROOT", ""),
             "Lidarr__Server__BindAddress": "127.0.0.1",
             "Lidarr__Server__Port": "18686",
-            "CRESCENDARR_PROBE_OPT_IN": "DISPOSABLE_SYNTHETIC_ONLY",
-            "CRESCENDARR_PROBE_SYNTHETIC_ROOT": str(synthetic),
         }
+        if mode == "probe":
+            environment["CRESCENDARR_PROBE_OPT_IN"] = "DISPOSABLE_SYNTHETIC_ONLY"
+            environment["CRESCENDARR_PROBE_SYNTHETIC_ROOT"] = str(synthetic)
+        elif mode == "guard-negative":
+            # Give the plugin a valid synthetic root, but WITHHOLD the mandatory opt-in.
+            environment["CRESCENDARR_PROBE_SYNTHETIC_ROOT"] = str(synthetic)
         logfile = base / "host-output.log"
         seen_intercept = False
         seen_service = False
+        guard_rejected = False
         running_http = False
         process = None
         try:
@@ -103,9 +112,14 @@ def main() -> int:
                     text = logfile.read_text(encoding="utf-8", errors="replace")
                     seen_service = "CRESCENDARR_RUNTIME SERVICE_SELECTED=" in text
                     seen_intercept = "CRESCENDARR_RUNTIME INTERCEPTION_OK" in text
-                    if seen_intercept:
-                        running_http = healthy_local_server(18686)
-                    if seen_service and seen_intercept and running_http:
+                    guard_rejected = "Crescendarr test probe is disabled without explicit disposable-host opt-in." in text
+                    running_http = healthy_local_server(18686)
+                    passed = running_http and (
+                        (mode == "probe" and seen_service and seen_intercept)
+                        or (mode == "baseline" and not seen_service and not seen_intercept)
+                        or (mode == "guard-negative" and guard_rejected and not seen_intercept)
+                    )
+                    if passed:
                         break
                     if process.poll() is not None:
                         break
@@ -122,10 +136,12 @@ def main() -> int:
         final = logfile.read_text(encoding="utf-8", errors="replace")
         # Don't print an entire application log. No credentials exist, but bound output.
         print("=== DISPOSABLE HOST DI/INTERCEPTION EVIDENCE ===")
+        print(f"mode={mode}")
         print(f"host_process_exit={process.returncode if process else 'not-started'}")
         print(f"selected_service_logged={seen_service}")
         print(f"synthetic_interception_logged={seen_intercept}")
         print(f"localhost_http_responded={running_http}")
+        print(f"test_only_guard_rejected={guard_rejected}")
         print(f"source_marker_still_present={(synthetic / '.crescendarr-disposable-host').exists()}")
         print("=== RELEVANT LOG LINES ===")
         for line in final.splitlines()[-350:]:
@@ -134,10 +150,20 @@ def main() -> int:
 
         assert (synthetic / ".crescendarr-disposable-host").exists(), "Fixture marker was unexpectedly removed"
         assert len(list(synthetic.iterdir())) == 1, "Probe modified the synthetic fixture directory"
-        if not (seen_service and seen_intercept and running_http):
+        passed = running_http and (
+            (mode == "probe" and seen_service and seen_intercept)
+            or (mode == "baseline" and not seen_service and not seen_intercept and not guard_rejected)
+            or (mode == "guard-negative" and guard_rejected and not seen_intercept)
+        )
+        if not passed:
             print("DISPOSABLE_RUNTIME_PROBE_INCONCLUSIVE: inspect host log and adapter registration", file=sys.stderr)
             return 1
-        print("DISPOSABLE_RUNTIME_PROBE_OK: DI selected Crescendarr and synthetic-only method was intercepted")
+        if mode == "probe":
+            print("DISPOSABLE_RUNTIME_PROBE_OK: DI selected Crescendarr and synthetic-only method was intercepted")
+        elif mode == "baseline":
+            print("DISPOSABLE_BASELINE_HOST_OK: fresh Lidarr ran without any Crescendarr plugin")
+        else:
+            print("DISPOSABLE_GUARD_REJECTION_OK: unopted probe refused service construction")
         return 0
 
 
