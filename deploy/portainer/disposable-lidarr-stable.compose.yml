@@ -1,0 +1,21 @@
+# Disposable Crescendarr host for testing plugin discovery and import interception.
+# Not for production. Creates a fresh Lidarr database in a dedicated Docker named volume.
+# Deliberately DOES NOT mount /music, /downloads, NAS, Docker socket, or production /config.
+services:
+  crescendarr-lidarr-lab:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: crescendarr-lidarr-lab
+    environment:
+      PUID: "1000" # Adjust only if your Docker host needs another UID
+      PGID: "1000" # Adjust only if your Docker host needs another GID
+      TZ: America/Chicago
+    volumes:
+      - crescendarr_lidarr_lab_config:/config
+    ports:
+      - "8687:8686"
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+volumes:
+  crescendarr_lidarr_lab_config:
