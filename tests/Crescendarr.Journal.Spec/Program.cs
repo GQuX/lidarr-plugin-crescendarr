@@ -39,6 +39,11 @@ internal static class Program
             ("L12 Symlink at a bound path is treated as escaping", SymlinkEscape),
             ("L13 Lab refuses roots outside temp, unmarked roots and missing opt-in", LabGuards),
             ("L14 Change between the last check and the native call: revalidation blocks it", ConcurrentChangeBeforeNative),
+            ("X01 Review A: ancestor or root link refused for new and reopened labs; nothing created through it", AncestorLinkEscape),
+            ("X02 Review A: lab-internal directory replaced by a link stops the lab before writing through it", InternalLinkEscape),
+            ("X03 Review B: duplicate or case-variant rows at a bound path, or a shared original file, never reach a destructive step", DuplicatePathRows),
+            ("X04 Review C: physical lyric path that is not artist root + registered relative path fails closed", LyricIdentityMismatch),
+            ("X05 Broader: hardlink planted at the backup path cannot destroy the original", HardlinkedBackupPath),
             ("K01 SIGKILL a separate process between local writes; a new process reconciles and recovers", KillAndReopen),
         };
 
@@ -48,15 +53,25 @@ internal static class Program
             specs = specs.Where(s => filter.Split(',').Any(f => s.Name.StartsWith(f, StringComparison.Ordinal))).ToArray();
 
         var failures = 0;
+        var notExecuted = 0;
         foreach (var (name, test) in specs)
         {
             var timer = Stopwatch.StartNew();
-            try { test(); Console.WriteLine($"PASS {name} ({timer.ElapsedMilliseconds} ms)"); }
+            var notesBefore = NotExecuted.Count;
+            try
+            {
+                test();
+                // A spec that could not exercise its scenario on this host is reported as
+                // NOT_EXECUTED, never as a pass.
+                if (NotExecuted.Count > notesBefore) { notExecuted++; Console.WriteLine($"NOT_EXECUTED {name}: {string.Join("; ", NotExecuted.Skip(notesBefore))}"); }
+                else Console.WriteLine($"PASS {name} ({timer.ElapsedMilliseconds} ms)");
+            }
             catch (Exception error) { failures++; Console.Error.WriteLine($"FAIL {name}: {error.GetType().Name}: {error.Message}"); }
         }
 
-        foreach (var note in NotExecuted) Console.WriteLine($"NOT_EXECUTED {note}");
-        Console.WriteLine($"{specs.Length - failures}/{specs.Length} journal specs passed");
+        var passed = specs.Length - failures - notExecuted;
+        Console.WriteLine($"JOURNAL_SPEC_TOTALS passed={passed} failed={failures} not_executed={notExecuted} total={specs.Length}");
+        Console.WriteLine($"{passed}/{specs.Length} journal specs passed");
         return failures == 0 ? 0 : 1;
     }
 
@@ -680,6 +695,242 @@ internal static class Program
                 True(host.TrackFiles.Any(f => f.TrackFileId == 500 + track - 100), $"{name}: original row intact");
             });
         }
+    }
+
+    // ---------- X: independent review findings (A, B, C) and broader adversarial review ----------
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]
+    private static extern bool CreateHardLinkWindows(string newPath, string existingPath, IntPtr security);
+
+    [System.Runtime.InteropServices.DllImport("libc", SetLastError = true, EntryPoint = "link")]
+    private static extern int LinkPosix(string existingPath, string newPath);
+
+    /// <summary>Creates a hardlink; returns false (caller records NOT_EXECUTED) when the platform refuses.</summary>
+    private static bool TryHardLink(string existing, string newPath)
+    {
+        try
+        {
+            return OperatingSystem.IsWindows() ? CreateHardLinkWindows(newPath, existing, IntPtr.Zero) : LinkPosix(existing, newPath) == 0;
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryDirectorySymlink(string link, string target, string spec)
+    {
+        try { Directory.CreateSymbolicLink(link, target); return true; }
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            NotExecuted.Add($"{spec} directory symlink creation not permitted on this host ({error.GetType().Name})");
+            return false;
+        }
+    }
+
+    private static string[] DestructiveExecuted(ExecutorReport report) =>
+        report.Executed.Where(e => e.StartsWith("DetachLyric", StringComparison.Ordinal) || e.StartsWith("InvokeNativeUpgrade", StringComparison.Ordinal) ||
+                                   e.StartsWith("RestoreOriginalBytes", StringComparison.Ordinal) || e.StartsWith("Insert", StringComparison.Ordinal)).ToArray();
+
+    private static void AddHostRow(string lab, int id, string path)
+    {
+        var host = new FakeHost(lab);
+        var s = host.Load();
+        s.TrackFiles.Add(new HostTrackFile(id, path));
+        host.Save(s, "test.addRow");
+    }
+
+    private static Exception? Record(Action action)
+    {
+        try { action(); return null; }
+        catch (Exception error) { return error; }
+    }
+
+    /// <summary>A: ancestor link must be refused for new roots and reopened roots; nothing written through it.</summary>
+    private static void AncestorLinkEscape()
+    {
+        var temp = LabSafety.Canonical(Path.GetTempPath());
+        var outside = Path.Combine(temp, "crescendarr-m13-outside-" + Guid.NewGuid().ToString("N"));
+        var alias = Path.Combine(temp, "crescendarr-m13-alias-" + Guid.NewGuid().ToString("N"));
+        var realAlias = Path.Combine(temp, "crescendarr-m13-alias-" + Guid.NewGuid().ToString("N"));
+        string? real = null;
+        Directory.CreateDirectory(outside);
+        try
+        {
+            if (!TryDirectorySymlink(alias, outside, "X01")) return;
+            Throws<LabSafetyException>(() => LabSafety.PrepareNewRoot(Path.Combine(alias, "new-lab")), "new root under an ancestor link accepted");
+            Throws<LabSafetyException>(() => LabSafety.PrepareNewRoot(alias), "new root that is itself a link accepted");
+            Eq(0, Directory.EnumerateFileSystemEntries(outside).Count(), "something was created through the alias");
+
+            // A marked lab that is lexically inside temp but physically outside it.
+            File.WriteAllText(Path.Combine(outside, LabSafety.MarkerName), LabSafety.MarkerContent);
+            Throws<LabSafetyException>(() => LabSafety.RequireExistingRoot(alias), "marked root behind a link accepted");
+            Eq(1, Directory.EnumerateFileSystemEntries(outside).Count(), "only the test's own marker exists outside");
+
+            // A real lab reopened through an alias of its own root.
+            real = LabScenario.Create(NewLabPath());
+            if (!TryDirectorySymlink(realAlias, real, "X01")) return;
+            var before = Directory.EnumerateFileSystemEntries(real, "*", SearchOption.AllDirectories).Count();
+            Throws<LabSafetyException>(() => LabSafety.RequireExistingRoot(realAlias), "existing root reopened through a link");
+            Throws<LabSafetyException>(() => Lab.Run(realAlias), "lab ran through a link");
+            Eq(before, Directory.EnumerateFileSystemEntries(real, "*", SearchOption.AllDirectories).Count(), "lab modified through the alias");
+        }
+        finally
+        {
+            if (Directory.Exists(realAlias)) Directory.Delete(realAlias);
+            if (Directory.Exists(alias)) Directory.Delete(alias);
+            Directory.Delete(outside, true);
+            if (real is not null) Directory.Delete(real, true);
+        }
+    }
+
+    /// <summary>A: a lab-internal directory replaced by a link must stop the lab before any write through it.</summary>
+    private static void InternalLinkEscape()
+    {
+        WithLab((lab, baseline) =>
+        {
+            var outside = Path.Combine(Path.GetTempPath(), "crescendarr-m13-outside-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(outside);
+            var ops = LabScenario.Ops(lab);
+            try
+            {
+                Directory.Delete(ops);
+                if (!TryDirectorySymlink(ops, outside, "X02")) { Directory.CreateDirectory(ops); return; }
+                var error = Record(() => Lab.Run(lab));
+                True(error is LabSafetyException, $"run through a linked ops directory was not refused by the lab guard: {error?.GetType().Name ?? "no error"}");
+                Eq(0, Directory.EnumerateFileSystemEntries(outside).Count(), "journal written through the link");
+            }
+            finally
+            {
+                if (new DirectoryInfo(ops).LinkTarget is not null) Directory.Delete(ops);
+                Directory.Delete(outside, true);
+            }
+        });
+    }
+
+    /// <summary>B: a different row at the original path, before the first step, during recovery, and just before native.</summary>
+    private static void DuplicatePathRows()
+    {
+        // Before the first step (track 103 destination differs from its original path).
+        WithLab((lab, baseline) =>
+        {
+            AddHostRow(lab, 777, LabScenario.OriginalPath(lab, 103));
+            var report = Lab.Run(lab);
+            Eq(OperationStatus.RequiresReview, report.Status, "duplicate row before first step");
+            Eq(0, DestructiveExecuted(report).Length, "destructive action with a duplicate row: " + string.Join(",", report.Executed));
+            True(File.Exists(LabScenario.IncomingPath(lab, 103)), "incoming 103 still staged");
+        });
+
+        // Case-variant spelling of the same path (NAS case folding).
+        WithLab((lab, baseline) =>
+        {
+            AddHostRow(lab, 778, LabScenario.OriginalPath(lab, 101).ToUpperInvariant());
+            var report = Lab.Run(lab);
+            Eq(OperationStatus.RequiresReview, report.Status, "case-variant duplicate row");
+            Eq(0, DestructiveExecuted(report).Length, "destructive action with a case-variant row");
+        });
+
+        // During recovery of an interrupted native step, even with operator approval enabled.
+        WithLab((lab, baseline) =>
+        {
+            Faults.Arm("crash", "native.103.afterInFlight");
+            _ = RunCatching(() => Lab.Run(lab));
+            Faults.Arm(null, null);
+            AddHostRow(lab, 779, LabScenario.OriginalPath(lab, 103));
+            var report = Lab.Recover(lab, approve: true);
+            Eq(Verdict.RequiresReview, report.FinalVerdict, "duplicate row during recovery");
+            Eq(0, DestructiveExecuted(report).Length, "destructive action during recovery: " + string.Join(",", report.Executed));
+            True(File.Exists(LabScenario.IncomingPath(lab, 103)), "incoming 103 still staged");
+            NoViolations(lab, baseline, "after duplicate row in recovery");
+        });
+
+        // Immediately before the destructive native call.
+        WithLab((lab, baseline) =>
+        {
+            Faults.Interleave = ("native.103.afterInFlight", () => AddHostRow(lab, 780, LabScenario.OriginalPath(lab, 103)));
+            var report = Lab.Run(lab);
+            Faults.Interleave = null;
+            Eq(OperationStatus.RequiresReview, report.Status, "duplicate row just before native");
+            True(File.Exists(LabScenario.IncomingPath(lab, 103)), "native never called for 103");
+            Eq(503, new FakeHost(lab).Load().Tracks.Single(t => t.TrackId == 103).TrackFileId, "track 103 still linked to its original");
+        });
+
+        // Another (unbound) track linked to a bound original file: the native delete would orphan it.
+        WithLab((lab, baseline) =>
+        {
+            var host = new FakeHost(lab);
+            var s = host.Load();
+            s.Tracks.Add(new HostTrack(199, LabScenario.RecordingMbid(199), 502));
+            host.Save(s, "test.sharedFile");
+            var report = Lab.Run(lab);
+            Eq(OperationStatus.RequiresReview, report.Status, "shared original file");
+            Eq(0, DestructiveExecuted(report).Length, "destructive action with a shared original file");
+        });
+    }
+
+    /// <summary>C: physical lyric path that is not artist root + registered relative path.</summary>
+    private static void LyricIdentityMismatch()
+    {
+        // A decoy .lrc bound as the physical file while the registered relative path names the real one.
+        WithLab((lab, baseline) =>
+        {
+            var decoy = Path.Combine(LabScenario.AlbumDir(lab), "decoy.lrc");
+            File.WriteAllText(decoy, "[00:01.00] decoy lyric\n");
+            var binding = LabScenario.Bind(lab, Lab.OperationId(lab));
+            var t = binding.Tracks[0];
+            var mismatched = binding with { Tracks = binding.Tracks.SetItem(0, t with { Lyric = t.Lyric! with { Path = decoy, Content = DurableFiles.Hash(decoy) } }) };
+            var hostBefore = HostBytes(lab);
+            var error = Record(() => LabExecutor.Run(lab, OperationStore.Create(LabScenario.Ops(lab), mismatched)));
+            True(error is not null, "mismatched lyric binding was accepted and executed");
+            Eq(hostBefore, HostBytes(lab), "host changed for a mismatched lyric binding");
+            NoViolations(lab, baseline, "after mismatched lyric binding");
+        });
+
+        // The registered lyric goes missing while the journal watches a byte-identical decoy.
+        WithLab((lab, baseline) =>
+        {
+            var decoy = Path.Combine(LabScenario.AlbumDir(lab), "decoy.lrc");
+            File.Copy(LabScenario.LyricPath(lab, 101), decoy);
+            var binding = LabScenario.Bind(lab, Lab.OperationId(lab));
+            var t = binding.Tracks[0];
+            var mismatched = binding with { Tracks = binding.Tracks.SetItem(0, t with { Lyric = t.Lyric! with { Path = decoy } }) };
+            File.Delete(LabScenario.LyricPath(lab, 101));
+            var error = Record(() => LabExecutor.Run(lab, OperationStore.Create(LabScenario.Ops(lab), mismatched)));
+            var host = new FakeHost(lab).Load();
+            True(error is not null || host.Lyrics.Any(l => l.LyricFileId == 801), "journal proceeded past lyric detach while the real registered lyric was missing");
+        });
+
+        // The host artist root changes after planning (fresh observation disagrees with the binding).
+        WithLab((lab, baseline) =>
+        {
+            Faults.Interleave = ("native.101.afterInFlight", () =>
+            {
+                var host = new FakeHost(lab);
+                var s = host.Load();
+                s.ArtistPath = Path.Combine(LabScenario.Library(lab), "Other Artist");
+                host.Save(s, "test.artist");
+            });
+            var report = Record(() => Lab.Run(lab));
+            Faults.Interleave = null;
+            True(File.Exists(LabScenario.IncomingPath(lab, 101)), "native called after the artist root changed");
+        });
+    }
+
+    /// <summary>Broader review: a hardlink planted at the operation-owned backup path must never let a backup write through to the original.</summary>
+    private static void HardlinkedBackupPath()
+    {
+        WithLab((lab, baseline) =>
+        {
+            Faults.Arm("crash", "backup.101.afterInFlight");
+            _ = RunCatching(() => Lab.Run(lab));
+            Faults.Arm(null, null);
+            var backup = Lab.Open(lab).Manifest.BindingFor(101).BackupAudioPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+            if (!TryHardLink(LabScenario.OriginalPath(lab, 101), backup)) { NotExecuted.Add("X05 hardlink creation not supported on this host"); return; }
+            _ = Record(() => Lab.Recover(lab, approve: false));
+            Eq(baseline.Originals[101], DurableFiles.Hash(LabScenario.OriginalPath(lab, 101)), "original bytes destroyed through a hardlinked backup path");
+            NoViolations(lab, baseline, "after hardlinked backup path");
+        });
     }
 
     // ---------- K: real process kill ----------
