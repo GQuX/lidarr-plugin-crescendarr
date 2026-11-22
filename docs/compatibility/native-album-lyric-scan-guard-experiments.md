@@ -42,6 +42,17 @@ A fully registered 12-track album scanned by stock `DiskScanService` produced ze
 
 Next proof needed before any unattended write-enable: a **real process crash and restart** midway through album-wide lyric detachment with an independently durably persisted, versioned journal; operator-safe replay from fresh post-scan host state; and a **host-serializable or fail-closed promotion boundary** that prevents an unknown visible file from being scanned before authoritative row linkage. The simulated interruption above does not establish any such atomicity, and SMB durability is completely unproven.
 
+## Follow-up: real separate-process crash recovery
+
+The real process-crash proof requested above is now characterized in [`native-album-lyric-crash-recovery.md`](native-album-lyric-crash-recovery.md), native CI 45082305345. It covers:
+- SIGKILL mid-detach and mid-reattach;
+- plugin-absent stock rescans;
+- observation-based recovery to fresh TrackFile IDs;
+- sticky `RequiresReview` for eight malformed, stale or conflicting cases;
+- replay across a second restart.
+
+The controls above are unchanged. The host-serializable promotion boundary is still unproven.
+
 ## Decision criteria
 
 A green test suite can establish how these specific *synthetic* controls behave. Neither test authorizes an unattended importer; a future protocol must protect every album sidecar and the unselected superior track across plugin absence, native scan and crash points, and also satisfy M15's **cross-album reference** contract.
