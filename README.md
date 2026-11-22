@@ -5,6 +5,14 @@
 > **DEVELOPMENT SOURCE ONLY. NOT INSTALLABLE. NOT SAFE FOR PRODUCTION.**
 > The plugin integration seam, import lifecycle, recovery and `.lrc` preservation have **not** been proven in a running Lidarr host.
 
+## Hard integration requirement: unmodified Lidarr (2026-11-22)
+
+The owner has ruled out **upstream Lidarr code changes, forks or custom Lidarr binaries**. Crescendarr must work as **one plugin on stock stable Lidarr**; a companion daemon or separate download manager is also out of scope. All upstream-only designs are historical research, **not the implementation roadmap**.
+
+**Current investigation:** [stock-Lidarr plugin-only feasibility](docs/architecture/stock-lidarr-plugin-only-feasibility-v0.1.md), tracked in [#16](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/16). The leading test hypothesis uses **Lidarr's own Completed Download Handling persistently OFF** while an in-process plugin observes jobs through Lidarr's configured download clients and selectively imports them. This would change one normal configuration setting only with user approval; it is neither implemented nor proven safe. It can hide completed jobs from Lidarr's stock queue and shifts cleanup/status/retry responsibilities to the plugin. Manual import and rescans remain separate hazards.
+
+No write-enabled plugin exists. Do not disable CDH or install anything on the user's production instance on the basis of this proposal.
+
 ## Architecture safety decision (2026-11-22)
 
 An independent review, followed by [Lidarr source verification](docs/reviews/2026-11-22-independent-review-triage.md), found a destructive mismatch: stock Lidarr can delete an entire album before selective imports, recycle/delete linked extras, and retry without plugins after some startup failures.
