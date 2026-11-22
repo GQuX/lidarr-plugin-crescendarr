@@ -1,3 +1,5 @@
+> **Not a delivery route:** The owner has ruled out Lidarr source/ABI changes. This unsubmitted upstream API proposal is archived as technical background; our active requirement is a standalone plugin on [stock Lidarr](stock-lidarr-plugin-only-feasibility-v0.1.md).
+
 > **Scope correction after ADR-024 review:** Stock Lidarr does not supply these proposed APIs. The [smaller incremental patch plan](host-selective-import-incremental-v0.2.md) is the preferred research direction. Several host changes are required before an optional single Crescendarr plugin could safely supply policy.
 
 > **Superseded in part by the post-native-test proposal:** [Recoverable host import protocol v0.1](host-recoverable-import-protocol-v0.1.md) documents stronger requirements for staging, recovery, lyrics, edition stability and completion. Existing Lidarr does NOT expose the suggested API.
