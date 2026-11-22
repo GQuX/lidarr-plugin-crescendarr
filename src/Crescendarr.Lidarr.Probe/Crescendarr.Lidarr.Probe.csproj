@@ -11,8 +11,8 @@
     <Error Condition="'$(LidarrBinDir)' == ''" Text="Set -p:LidarrBinDir=/ABSOLUTE/PATH/TO/DISPOSABLE/LIDARR/BIN" />
   </Target>
   <ItemGroup>
-    <Reference Include="NzbDrone.Core"><HintPath>$(LidarrBinDir)/NzbDrone.Core.dll</HintPath><Private>false</Private></Reference>
-    <Reference Include="NzbDrone.Common"><HintPath>$(LidarrBinDir)/NzbDrone.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System.IO.Abstractions"><HintPath>$(LidarrBinDir)/System.IO.Abstractions.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
