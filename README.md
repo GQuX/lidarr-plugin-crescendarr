@@ -15,7 +15,7 @@ The current source is **only**:
 - `tests/Crescendarr.Core.Spec/`: standalone executable specifications using synthetic identities and a **fake** quality policy. They do not validate Lidarr's real quality profiles.
 - `src/Crescendarr.Lidarr.Probe/`: deliberately non-delegating, test-only registration experiment. It has **no installer, no release workflow** and must not be put into production Lidarr.
 - `deploy/portainer/disposable-lidarr-stable.compose.yml`: no-production-mount disposable host example (separate `/config`, port 8687); this does **not** install the probe.
-- `tools/check_disposable_compose.py` and `tools/tests/`: development-only Compose lint plus 13 regression checks for unsafe configuration.
+- `tools/check_disposable_compose.py` and `tools/tests/`: development-only Compose lint plus 16 regression checks for unsafe configuration.
 - `docs/`: pinned compatibility hypotheses, safety boundaries, Portainer guide, experiment protocol and report template.
 
 No import execution, queue completion, or recovery implementation exists yet.
@@ -40,7 +40,7 @@ Requires the **.NET 8 SDK**:
 dotnet run --project tests/Crescendarr.Core.Spec/Crescendarr.Core.Spec.csproj -c Release
 ```
 
-No NuGet test framework dependency is needed. **These tests have not been run in the authoring environment**, because no .NET SDK is installed there. Do not treat the checked-in expected assertions as verified passing tests until your CI/SDK actually runs them.
+No NuGet test framework dependency is needed. **GitHub Actions compiled and executed all 29 core specifications successfully on 2026-11-22.** The authoring environment has no local .NET SDK; the CI result applies to the pure planner, not to the test-only Lidarr probe or production imports.
 
 ## The critical host experiment
 
@@ -61,13 +61,13 @@ The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0
 - [x] Initial pure domain/planner and synthetic specs authored
 - [x] Experimental host-probe source authored
 - [x] Disposable Portainer example, lint and 16 Python safety regression tests (passed in authoring environment)
-- [ ] .NET 8 compile and spec run
+- [x] .NET 8 pure-core compile and 29/29 synthetic specs passed in [GitHub Actions](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45018712104)
 - [ ] Disposable Lidarr host and DI comparison
 - [ ] Supported pre-import contract with truthful zero/partial/full outcomes
 - [ ] Verified `.lrc` preservation, edition lock and recoverable SMB-safe upgrades
 - [ ] Build a real installable plugin
 
-GitHub development repository: https://github.com/GQuX/lidarr-plugin-crescendarr. No license has been selected yet; do not assume open-source reuse rights until a license is added.
+GitHub development repository: https://github.com/GQuX/lidarr-plugin-crescendarr. Licensed under [0BSD](LICENSE): reuse, modification, and redistribution are permitted without attribution requirements.
 
 ## Portainer lab deployment (v0.1.1)
 
@@ -78,6 +78,10 @@ Use **a new Portainer stack**, not the production multi-service stack. The lab C
 Lidarr stable v3.1.6.5079 has plugin loading in its tagged source and targets net8.0.
 This source now targets .NET 8. Production Lidarr is a **compatibility reference only**.
 The operator confirmed an independent backup and Watchtower exclusion; **no probe may be installed**
-on that live container. Current source checks are static only; the C# code has not been compiled.
+on that live container. The pure .NET 8 planner compiled and passed 29/29 synthetic specifications in GitHub Actions. The host interception probe is still uncompiled and untested.
 Full input snapshot hashing is now included in merge plan identifiers, but these fingerprints
 are advisory: only a host-owned revalidation and recoverable import executor can authorize writes.
+
+## Upstream overlap
+
+[Lidarr PR #6166](https://github.com/Lidarr/Lidarr/pull/6166) (open and unmerged when checked on 2026-11-22) proposes song selection, selective imports, and queue-aware recording intent. That work may supply a safer host-owned seam or make some Crescendarr functionality redundant. We are tracking its changes before considering any upstream submission. The PR does **not** on its own verify our automatic album-download upgrade rules, edition-lock guarantees, `.lrc` handling, crash recovery, or SMB-safe replacement semantics. See [upstream overlap notes](docs/architecture/upstream-overlap-pr6166.md).
