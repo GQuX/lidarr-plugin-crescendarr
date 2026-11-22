@@ -1,0 +1,20 @@
+**/bin/
+**/obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+.env
+_temp/
+artifacts/
+# Never check a Lidarr runtime/DB/fixture output into this repository.
+lidarr-runtime/
+lidarr-data/
+synthetic-host/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.pyc
+.pytest_cache/
