@@ -433,7 +433,10 @@ namespace NzbDrone.Core.Test.MediaFiles
             Mocker.SetConstant<IDiskProvider>(Mocker.Resolve<IDiskProvider>(FileSystemType.Actual));
             Mocker.GetMock<IConfigService>().SetupGet(x => x.RecycleBin).Returns(w.Recycle);
             Mocker.SetConstant<IRecycleBinProvider>(Mocker.Resolve<RecycleBinProvider>());
-            w.Lyrics = Mocker.Resolve<LyricFileService>();
+            // AutoMoqer caches resolved concrete types, so Resolve<LyricFileService>() would return the
+            // instance built in BuildWorld with a MOCKED disk provider. Construct it explicitly.
+            w.Lyrics = new LyricFileService(Mocker.Resolve<IExtraFileRepository<LyricFile>>(), Mocker.Resolve<IArtistService>(),
+                Mocker.Resolve<IDiskProvider>(), Mocker.Resolve<IRecycleBinProvider>(), LogManager.GetLogger("CrescendarrM14Lyric"));
             Mocker.SetConstant<IExtraFileService<LyricFile>>(w.Lyrics);
             Assert.That(Db.All<LyricFile>().Count, Is.GreaterThan(0), "lyric rows were registered before wiring");
 
