@@ -8,6 +8,7 @@ on:
     paths:
       - 'src/Crescendarr.Lidarr.ObserverProbe/**'
       - 'tools/experiments/run_disposable_observer.py'
+      - 'tools/experiments/run_disposable_configured_observer.py'
       - '.github/workflows/disposable-observer.yml'
   workflow_dispatch:
 
@@ -61,3 +62,13 @@ jobs:
             "${{ steps.host.outputs.bin }}" \
             "${RUNNER_TEMP}/crescendarr-observer-probe/Lidarr.Plugin.Crescendarr.ObserverProbe.dll"
           echo "Read-only plugin resolved stock client factory and CDH setting; zero actual providers/imports." >> "$GITHUB_STEP_SUMMARY"
+      - name: Configure disposable stock Lidarr CDH OFF with synthetic completed blackhole album
+        shell: bash
+        env:
+          CI: "true"
+        run: |
+          set -euo pipefail
+          python3 tools/experiments/run_disposable_configured_observer.py \
+            "${{ steps.host.outputs.bin }}" \
+            "${RUNNER_TEMP}/crescendarr-observer-probe/Lidarr.Plugin.Crescendarr.ObserverProbe.dll"
+          echo "STOCK_CDH_OFF_SYNTHETIC_CLIENT_OBSERVED (test only: no user data)" >> "$GITHUB_STEP_SUMMARY"
