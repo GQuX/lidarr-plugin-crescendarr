@@ -85,12 +85,15 @@ namespace NzbDrone.Core.Test.MediaFiles
             if (scenario == Scenario.ControlUnlinkedValidFile)
             {
                 Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Sixth).TrackFileId, Is.EqualTo(0));
-                RunRealScan(w, recorder, "control");
-                FinishWithEvidence(w, scenario);
+                var controlScan = RunRealScan(w, recorder, "control");
+                AssertStockFullAlbumRescanCascade(w, controlScan, scenario);
+                AssertSixthLinkedAfterScan(w, Quality.MP3_192, w.OwnedBytes[Sixth]);
+                AssertHeldInvariants(w);
                 return;
             }
 
             ScanObservation interleaved = null;
+            ScanObservation scan = null;
             w.TransferHook = (source, destination, mode, overwrite) =>
             {
                 if (source != w.IncomingPaths[Sixth] || destination != w.OwnedPaths[Sixth])
@@ -113,7 +116,23 @@ namespace NzbDrone.Core.Test.MediaFiles
                 }
             };
 
-            var results = ImportUpgrades(w);
+            List<ImportResult> results = null;
+            Exception importFailure = null;
+            try
+            {
+                results = ImportUpgrades(w);
+            }
+            catch (Exception error) when (scenario == Scenario.ScanInterleavedInsideImporter)
+            {
+                importFailure = error;
+            }
+
+            if (scenario == Scenario.ScanInterleavedInsideImporter)
+            {
+                CharacterizeInterleavedScan(w, interleaved, importFailure);
+                return;
+            }
+
             Log($"M14_TAGGED_IMPORT_RESULTS scenario={scenario} " + string.Join(",", results.Select(r => r.Result)));
             LogDb("after-import", w);
 
@@ -129,7 +148,9 @@ namespace NzbDrone.Core.Test.MediaFiles
                     // and deliberately NO fresh row yet (that step needs operator approval in M13).
                     File.Copy(w.BackupPaths[Sixth], w.OwnedPaths[Sixth], overwrite: false);
                     Assert.That(File.ReadAllBytes(w.OwnedPaths[Sixth]), Is.EqualTo(w.OwnedBytes[Sixth]));
-                    RunRealScan(w, recorder, "after-restore");
+                    scan = RunRealScan(w, recorder, "after-restore");
+                    AssertStockFullAlbumRescanCascade(w, scan, scenario);
+                    AssertSixthLinkedAfterScan(w, Quality.MP3_192, w.OwnedBytes[Sixth]);
                     break;
 
                 case Scenario.IncomingTransferredButUnlinked:
@@ -137,23 +158,103 @@ namespace NzbDrone.Core.Test.MediaFiles
                         "incoming sixth bytes placed at the destination");
                     Assert.That(Db.All<TrackFile>().Any(f => f.Path == w.OwnedPaths[Sixth]), Is.False,
                         "no row for the placed sixth file before the scan");
-                    RunRealScan(w, recorder, "after-unlinked-transfer");
-                    break;
-
-                case Scenario.ScanInterleavedInsideImporter:
-                    Assert.That(interleaved, Is.Not.Null, "the interleaved scan ran inside the importer");
-                    Assert.That(results.Count(r => r.Result == ImportResultType.Imported), Is.EqualTo(Upgrades));
+                    scan = RunRealScan(w, recorder, "after-unlinked-transfer");
+                    AssertStockFullAlbumRescanCascade(w, scan, scenario);
+                    AssertSixthLinkedAfterScan(w, Quality.MP3_256, w.IncomingBytes[Sixth]);
                     break;
             }
 
-            FinishWithEvidence(w, scenario);
+            AssertHeldInvariants(w);
         }
 
-        /// <summary>Evidence-gathering pass: reports every violated invariant at once.</summary>
-        private void FinishWithEvidence(World w, Scenario scenario)
+        /// <summary>
+        /// CHARACTERIZED STOCK HAZARD (observed in native CI, not a Crescendarr guarantee): one unknown audio
+        /// file makes the real scan identify the album with IncludeExisting=true, emit an approved decision for
+        /// EVERY existing album file, and re-import each one: its TrackFile row is deleted with ManualOverride
+        /// and re-inserted under a new ID. The stock extra-file handler then recycles every lyric that was still
+        /// registered to a deleted row; the stock existing-lyric importer does not re-register them.
+        /// </summary>
+        private void AssertStockFullAlbumRescanCascade(World w, ScanObservation scan, Scenario scenario)
         {
-            var violations = CollectInvariants(w, scenario);
-            Assert.That(violations, Is.Empty, "Crescendarr invariants violated by the stock scan: " + string.Join("; ", violations));
+            var tracks = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber);
+            var rows = Db.All<TrackFile>().ToDictionary(f => f.Id);
+            Assert.That(scan.Decisions.Count, Is.EqualTo(Total), "real decisions for every album file, not just the unknown one");
+            Assert.That(scan.Decisions.All(d => d.Approved), Is.True, "every real decision approved");
+            Assert.That(scan.Decisions.Count(d => d.Item.AdditionalFile), Is.EqualTo(Total - 1), "all but the unknown file arrived as additional existing files");
+
+            for (var i = 1; i <= Total; i++)
+            {
+                if (scan.LinksBefore[i] > 0)
+                {
+                    Assert.That(tracks[i].TrackFileId, Is.Not.EqualTo(scan.LinksBefore[i]), $"track {i} relinked to a NEW row by the scan");
+                    Assert.That(rows.ContainsKey(scan.LinksBefore[i]), Is.False, $"track {i} pre-scan row deleted");
+                }
+
+                Assert.That(rows.TryGetValue(tracks[i].TrackFileId, out var row) && row.Path == w.OwnedPaths[i], Is.True, $"track {i} linked to a row at its own path");
+
+                var recycledLyric = Directory.Exists(w.Recycle)
+                    ? Directory.EnumerateFiles(w.Recycle, Path.GetFileName(w.LyricPaths[i]), SearchOption.AllDirectories).ToList()
+                    : new List<string>();
+                if (scan.RegisteredLyricTracksBefore.Contains(i))
+                {
+                    Assert.That(File.Exists(w.LyricPaths[i]), Is.False, $"registered lyric {i} removed from the library by the scan");
+                    Assert.That(recycledLyric.Count, Is.EqualTo(1), $"registered lyric {i} moved to the recycle bin");
+                    Assert.That(File.ReadAllBytes(recycledLyric[0]), Is.EqualTo(w.LyricBytes[i]), $"recycled lyric {i} bytes intact");
+                }
+                else
+                {
+                    Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]), $"unregistered (detached) lyric {i} untouched by the scan");
+                    Assert.That(recycledLyric, Is.Empty, $"unregistered lyric {i} not recycled");
+                }
+            }
+
+            Assert.That(Db.All<LyricFile>(), Is.Empty, "no lyric row survives or is re-registered after the scan");
+            Assert.That(scan.RegisteredLyricTracksBefore.Contains(Total), Is.True, "the protected track's lyric was registered before the scan");
+            Log($"M14_TAGGED_CASCADE scenario={scenario} relinked={scan.LinksBefore.Count(kv => kv.Value > 0)} " +
+                $"lyricsRecycled={scan.RegisteredLyricTracksBefore.Count} lyricRowsAfter=0 protectedFlacRowReplaced=true");
+        }
+
+        private void AssertSixthLinkedAfterScan(World w, Quality expected, byte[] bytes)
+        {
+            var sixth = Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Sixth);
+            var row = Db.All<TrackFile>().Single(f => f.Id == sixth.TrackFileId);
+            Assert.That(row.Path, Is.EqualTo(w.OwnedPaths[Sixth]), "stock scan linked track six to the file at its path");
+            Assert.That(row.Quality.Quality, Is.EqualTo(expected), "quality read from the actual file");
+            Assert.That(File.ReadAllBytes(w.OwnedPaths[Sixth]), Is.EqualTo(bytes), "the scan did not rewrite the sixth file");
+        }
+
+        /// <summary>Invariants that HELD in every characterized scenario.</summary>
+        private void AssertHeldInvariants(World w)
+        {
+            Assert.That(File.ReadAllBytes(w.OwnedPaths[Total]), Is.EqualTo(w.OwnedBytes[Total]), "protected superior FLAC bytes unchanged");
+            Assert.That(File.ReadAllBytes(w.IncomingPaths[Total]), Is.EqualTo(w.IncomingBytes[Total]), "rejected inferior candidate still staged");
+            for (var i = 1; i <= Total; i++)
+            {
+                Assert.That(File.ReadAllBytes(w.BackupPaths[i]), Is.EqualTo(w.OwnedBytes[i]), $"independent backup {i} intact");
+            }
+
+            var releases = Db.All<AlbumRelease>();
+            Assert.That(releases.Count(r => r.Monitored), Is.EqualTo(1));
+            Assert.That(releases.Single(r => r.Monitored).ForeignReleaseId, Is.EqualTo(ReleaseMbid), "monitored MusicBrainz release unchanged");
+            Assert.That(Db.All<TrackFile>().GroupBy(f => f.Path).Any(g => g.Count() > 1), Is.False, "stock schema keeps TrackFile paths unique");
+            _ = CollectInvariants(w, Scenario.ControlUnlinkedValidFile);
+        }
+
+        /// <summary>
+        /// A scan forced to run INSIDE the importer (after tracks 1-5 were moved and their old rows deleted, before
+        /// the importer's batch insert). Stock Lidarr serializes scans and imports with its disk-access command lock,
+        /// so this interleaving is test-forced, not a demonstrated production race.
+        /// </summary>
+        private void CharacterizeInterleavedScan(World w, ScanObservation interleaved, Exception importFailure)
+        {
+            Assert.That(interleaved, Is.Not.Null, "the interleaved scan ran inside the importer");
+            Assert.That(interleaved.Decisions.Count, Is.EqualTo(Total - 1), "real decisions for the 11 files present at that moment (track six recycled, not yet transferred)");
+            Assert.That(importFailure, Is.Not.Null, "the importer did not complete normally after the interleaved scan");
+            var sqlite = importFailure as System.Data.SQLite.SQLiteException ?? importFailure.InnerException as System.Data.SQLite.SQLiteException;
+            Assert.That(sqlite, Is.Not.Null, "importer failure type: " + importFailure.GetType().Name);
+            Assert.That(sqlite.Message, Does.Contain("UNIQUE constraint failed: TrackFiles.Path"), "batch insert collided with rows the scan created");
+            LogDb("after-interleaved-import-failure", w);
+            AssertHeldInvariants(w);
         }
 
         // ------------------------------------------------------------------ world
@@ -190,6 +291,8 @@ namespace NzbDrone.Core.Test.MediaFiles
         {
             public string Label;
             public List<ImportDecision<LocalTrack>> Decisions = new List<ImportDecision<LocalTrack>>();
+            public Dictionary<int, int> LinksBefore;
+            public HashSet<int> RegisteredLyricTracksBefore;
         }
 
         /// <summary>Records every decision the REAL stock decision maker returns.</summary>
@@ -553,11 +656,15 @@ namespace NzbDrone.Core.Test.MediaFiles
                 .Returns(new List<IHandle<ArtistScannedEvent>> { existingExtras });
 
             var before = recorder.Calls.Count;
+            var linksBefore = Db.All<Track>().ToDictionary(t => t.AbsoluteTrackNumber, t => t.TrackFileId);
+            var registeredBefore = new HashSet<int>(Db.All<LyricFile>()
+                .Select(l => Db.All<Track>().FirstOrDefault(t => t.TrackFileId == l.TrackFileId))
+                .Where(t => t != null).Select(t => t.AbsoluteTrackNumber));
             ExceptionVerification.IgnoreWarns();
             scanner.Scan(new List<string> { w.Artist.Path }, FilterFilesType.Known, false, new List<int> { w.Artist.Id });
             Assert.That(recorder.Calls.Count, Is.EqualTo(before + 1), "real decision maker invoked once by the scan");
 
-            var observation = new ScanObservation { Label = label, Decisions = recorder.Calls.Last() };
+            var observation = new ScanObservation { Label = label, Decisions = recorder.Calls.Last(), LinksBefore = linksBefore, RegisteredLyricTracksBefore = registeredBefore };
             foreach (var d in observation.Decisions)
             {
                 var item = d.Item;
