@@ -40,6 +40,11 @@ jobs:
           test "$actual" = "da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd"
           cp crescendarr/tests/LidarrNative/CrescendarrAlbumUpgradeCharacterizationFixture.cs \
             upstream-lidarr/src/NzbDrone.Core.Test/MediaFiles/CrescendarrAlbumUpgradeCharacterizationFixture.cs
+          # Upstream Core.Test relies on a platform assembly loaded via Assembly.Load
+          # in AutoMoqer. An isolated test-project-only build does not stage it.
+          # Add the normal Linux platform project only in this throwaway checkout.
+          dotnet add upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj reference \
+            upstream-lidarr/src/NzbDrone.Mono/Lidarr.Mono.csproj
           echo "Upstream source pinned at $actual, characterization fixture staged in ephemeral checkout" >> "$GITHUB_STEP_SUMMARY"
       # The 2026 NuGet advisory database flags a historical ImageSharp dependency
       # in this exact 2026 Lidarr source; its original TreatWarningsAsErrors blocks
