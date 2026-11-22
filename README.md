@@ -31,6 +31,12 @@ The [disposable stock host test](docs/compatibility/stock-lidarr-readonly-observ
 
 **This validates completed-job observation and a narrow uninstall fallback, not safe per-track file merging.** The test had no audio to import, no SABnzbd connection, and no real library or NAS; all file replacement, edition, lyrics/DB consistency and crash recovery remain release blockers. Do not change production Completed Download Handling or install the disposable probe.
 
+## Native lyric-row recovery validated in disposable SQLite
+
+An independent plugin-only architecture review identified a viable **test-only** lyric-protection method: unlink a registered `.lrc` database row through Lidarr's own `IExtraFileService<LyricFile>` before a target upgrade, then reinsert a new association for the verified replacement TrackFile. [Six new tests, **32/32 total passing**](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45034922371), including **real migrated disposable SQLite** and real synthetic `.lrc` text bytes, show that the DB-only unlink preserves the physical lyric and that a new `Id=0` is required for reinsert. [Full review triage](docs/reviews/2026-11-22-plugin-only-claude-review-triage.md).
+
+This does **not** yet demonstrate a safe audio import or a collision-free crash recovery path. No actual per-track replacement was performed in these tests. Do not enable writes or modify production Lidarr based on these results.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
