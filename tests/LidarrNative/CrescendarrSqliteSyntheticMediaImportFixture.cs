@@ -13,6 +13,10 @@ using FizzWare.NBuilder;
 using Moq;
 using NUnit.Framework;
 using NzbDrone.Common.Disk;
+using NzbDrone.Common;
+using NzbDrone.Common.Messaging;
+using NzbDrone.Core.MediaFiles.Events;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.Datastore;
@@ -63,6 +67,29 @@ namespace NzbDrone.Core.Test.MediaFiles
                 incomingAlternateEdition: incomingAlternateEdition);
         }
 
+        // M14 orphan-rescan gate: let actual stock DiskScanService.Scan run after the
+        // real sixth file transfer fault but BEFORE the test-only recovery. The opaque
+        // payloads cannot pass Lidarr's audio tag reader, so decision discovery is
+        // deliberately stubbed to empty. This characterizes scan cleanup/event wiring,
+        // not a full native identification and import pass.
+        [Test]
+        public void native_scan_before_recovering_sixth_transfer_failure_preserves_recovery_evidence()
+        {
+            RunSelectiveImport(failAtSix: true, preserveInterruptedCheckpoint: false,
+                useStockDiskPipeline: true, scanBeforeRecovery: true);
+        }
+
+        // Compare a more host-like failure: native synchronous deletion handlers were
+        // registered BEFORE the failing importer, not added only for the later scan.
+        // This can change whether track 6 retains a dangling ID or becomes unlinked.
+        [Test]
+        public void native_delete_event_fanout_before_scan_then_recovers_sixth_transfer_failure()
+        {
+            RunSelectiveImport(failAtSix: true, preserveInterruptedCheckpoint: false,
+                useStockDiskPipeline: true, scanBeforeRecovery: true,
+                realEventsDuringImport: true);
+        }
+
         // Called only by an explicit, isolated CI step; never in the normal suite.
         // The source-pinned DbTest database is exported before its teardown and
         // checked in a different dotnet test process by the companion fixture.
@@ -76,7 +103,8 @@ namespace NzbDrone.Core.Test.MediaFiles
 
         private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint,
             bool useStockDiskPipeline = false, bool withCompetingEdition = false,
-            bool incomingAlternateEdition = false)
+            bool incomingAlternateEdition = false, bool scanBeforeRecovery = false,
+            bool realEventsDuringImport = false)
         {
             var restartRoot = Environment.GetEnvironmentVariable("CRESCENDARR_M12_RESTART_ROOT");
             if (preserveInterruptedCheckpoint)
@@ -213,7 +241,12 @@ namespace NzbDrone.Core.Test.MediaFiles
                     AlbumId = album.Id,
                     Size = oldBytes[i].LongLength,
                     Modified = File.GetLastWriteTimeUtc(ownedPath),
-                    Quality = new QualityModel(i == Total ? Quality.FLAC : Quality.MP3_192)
+                    Quality = new QualityModel(i == Total ? Quality.FLAC : Quality.MP3_192),
+                    // Stock ExtraFileService.Handle(TrackFileDeletedEvent) accesses
+                    // trackFile.Artist.Value before enumerating lyric rows. The old
+                    // M12 fixture used a mocked event aggregator and never needed
+                    // this relationship; real event fan-out does.
+                    Artist = new LazyLoaded<Artist>(artist)
                 };
                 Db.Insert(old);
                 previous[i] = old;
@@ -266,7 +299,43 @@ namespace NzbDrone.Core.Test.MediaFiles
             Mocker.SetConstant<IMediaFileRepository>(Mocker.Resolve<MediaFileRepository>());
             Mocker.SetConstant<ITrackRepository>(Mocker.Resolve<TrackRepository>());
             Mocker.SetConstant<IReleaseRepository>(Mocker.Resolve<ReleaseRepository>());
-            Mocker.SetConstant<IMediaFileService>(Mocker.Resolve<MediaFileService>());
+
+            IEventAggregator importerBus = null;
+            if (realEventsDuringImport)
+            {
+                // Unlike the older M12 fixture, register ACTUAL stock synchronous
+                // TrackFileDeletedEvent handlers BEFORE the sixth-file failure.
+                // Native media deletion should now publish to real TrackService
+                // (DetachTrackFile) and LyricFileService on the real SQLite state.
+                var trackService = Mocker.Resolve<TrackService>();
+                Mocker.SetConstant<ITrackService>(trackService);
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandle<TrackFileDeletedEvent>>())
+                    .Returns(new List<IHandle<TrackFileDeletedEvent>>
+                    {
+                        trackService,
+                        lyrics
+                    });
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandleAsync<IEvent>>())
+                    .Returns(new List<IHandleAsync<IEvent>>());
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandleAsync<TrackFileDeletedEvent>>())
+                    .Returns(new List<IHandleAsync<TrackFileDeletedEvent>>());
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandle<TrackFileAddedEvent>>())
+                    .Returns(new List<IHandle<TrackFileAddedEvent>>());
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandleAsync<TrackFileAddedEvent>>())
+                    .Returns(new List<IHandleAsync<TrackFileAddedEvent>>());
+                importerBus = Mocker.Resolve<EventAggregator>();
+                Mocker.SetConstant<IEventAggregator>(importerBus);
+            }
+
+            Mocker.SetConstant<IMediaFileService>(realEventsDuringImport
+                ? new MediaFileService(Mocker.Resolve<IMediaFileRepository>(), importerBus,
+                    NLog.LogManager.GetLogger("CrescendarrM14NativeEventsDuringImport"))
+                : Mocker.Resolve<MediaFileService>());
             Mocker.SetConstant<ITrackService>(Mocker.Resolve<TrackService>());
             Mocker.SetConstant<IReleaseService>(Mocker.Resolve<ReleaseService>());
 
@@ -401,8 +470,21 @@ namespace NzbDrone.Core.Test.MediaFiles
                 // the old file was recycled and its TrackFile row is gone, while the
                 // incoming sixth file is still in staging and lyrics were DB-unlinked.
                 var orphan = Db.All<Track>().Single(x => x.AbsoluteTrackNumber == 6);
-                Assert.That(orphan.TrackFileId, Is.EqualTo(previous[6].Id));
-                Assert.That(Db.All<TrackFile>().Any(x => x.Id == orphan.TrackFileId), Is.False);
+                if (realEventsDuringImport)
+                {
+                    // With actual synchronous stock deletion subscribers, the
+                    // ghost reference should be cleared by TrackService.Handle.
+                    Assert.That(orphan.TrackFileId, Is.EqualTo(0),
+                        "Real stock TrackFileDeletedEvent did not detach track six.");
+                    TestContext.Progress.WriteLine(
+                        "M14_REAL_EVENT_FAULT_OBSERVED: stock deletion handlers detached track 6 " +
+                        "before the scan; sixth TrackFile DB row gone and original bytes recycled.");
+                }
+                else
+                {
+                    Assert.That(orphan.TrackFileId, Is.EqualTo(previous[6].Id));
+                }
+                Assert.That(Db.All<TrackFile>().Any(x => x.Id == previous[6].Id), Is.False);
                 Assert.That(File.Exists(physicalPaths[6]), Is.False);
                 Assert.That(File.Exists(Path.Combine(staging, "06-synthetic.mp3")), Is.True);
                 var sixthRecycled = useStockDiskPipeline
@@ -411,6 +493,110 @@ namespace NzbDrone.Core.Test.MediaFiles
                 Assert.That(File.ReadAllBytes(sixthRecycled), Is.EqualTo(oldBytes[6]));
                 Assert.That(Db.All<LyricFile>().Any(x => x.TrackFileId == previous[6].Id), Is.False);
                 Assert.That(File.ReadAllBytes(lyricPaths[6]), Is.EqualTo(lyricBytes[6]));
+
+                if (scanBeforeRecovery)
+                {
+                    // The actual stock DiskScanService.Scan executes its own file enumeration,
+                    // MediaFileTableCleanupService.Clean, media-file repository queries, and
+                    // event dispatch before any recovery. We deliberately suppress *new import
+                    // decisions* because the fixture files are not tagged audio. The native
+                    // ImportApprovedTracks and core cleanup implementations are not mocked.
+                    var linksBeforeScan = Db.All<Track>().ToDictionary(x => x.Id, x => x.TrackFileId);
+                    var fileIdsBeforeScan = Db.All<TrackFile>().Select(x => x.Id).OrderBy(x => x).ToArray();
+                    var lyricIdsBeforeScan = Db.All<LyricFile>().Select(x => x.Id).OrderBy(x => x).ToArray();
+                    var originalMediaService = Mocker.Resolve<IMediaFileService>();
+                    var originalEventAggregator = Mocker.Resolve<IEventAggregator>();
+
+                    Mocker.GetMock<IServiceFactory>()
+                        .Setup(x => x.BuildAll<IHandle<TrackFileDeletedEvent>>())
+                        .Returns(new List<IHandle<TrackFileDeletedEvent>>
+                        {
+                            Mocker.Resolve<TrackService>(),
+                            lyrics
+                        });
+                    Mocker.GetMock<IServiceFactory>()
+                        .Setup(x => x.BuildAll<IHandle<ArtistScannedEvent>>())
+                        .Returns(new List<IHandle<ArtistScannedEvent>>());
+                    Mocker.GetMock<IServiceFactory>()
+                        .Setup(x => x.BuildAll<IHandleAsync<IEvent>>())
+                        .Returns(new List<IHandleAsync<IEvent>>());
+                    Mocker.GetMock<IServiceFactory>()
+                        .Setup(x => x.BuildAll<IHandleAsync<ArtistScannedEvent>>())
+                        .Returns(new List<IHandleAsync<ArtistScannedEvent>>());
+                    Mocker.GetMock<IServiceFactory>()
+                        .Setup(x => x.BuildAll<IHandleAsync<TrackFileDeletedEvent>>())
+                        .Returns(new List<IHandleAsync<TrackFileDeletedEvent>>());
+
+                    var realBus = Mocker.Resolve<EventAggregator>();
+                    Mocker.SetConstant<IEventAggregator>(realBus);
+                    // Construct a NEW real media service after selecting the real bus,
+                    // otherwise an already-resolved instance still holds the mocked bus.
+                    Mocker.SetConstant<IMediaFileService>(new MediaFileService(
+                        Mocker.Resolve<IMediaFileRepository>(), realBus,
+                        NLog.LogManager.GetLogger("CrescendarrM14ScanBeforeRecovery")));
+                    Mocker.SetConstant<IMediaFileTableCleanupService>(
+                        Mocker.Resolve<MediaFileTableCleanupService>());
+
+                    Mocker.GetMock<IArtistService>()
+                        .Setup(x => x.GetArtists(It.IsAny<IEnumerable<int>>()))
+                        .Returns(new List<Artist> { artist });
+                    Mocker.GetMock<IMakeImportDecision>()
+                        .Setup(x => x.GetImportDecisions(
+                            It.IsAny<List<System.IO.Abstractions.IFileInfo>>(),
+                            It.IsAny<IdentificationOverrides>(),
+                            It.IsAny<ImportDecisionMakerInfo>(),
+                            It.IsAny<ImportDecisionMakerConfig>()))
+                        .Returns(new List<ImportDecision<LocalTrack>>());
+
+                    // DO NOT restore track six first: this is precisely the missing-file
+                    // scenario that can occur after a process crash or before plugin load.
+                    Mocker.Resolve<DiskScanService>().Scan(
+                        new List<string> { artist.Path },
+                        FilterFilesType.Known, false, new List<int> { artist.Id });
+
+                    Mocker.GetMock<IMakeImportDecision>()
+                        .Verify(x => x.GetImportDecisions(
+                            It.IsAny<List<System.IO.Abstractions.IFileInfo>>(),
+                            It.IsAny<IdentificationOverrides>(),
+                            It.IsAny<ImportDecisionMakerInfo>(),
+                            It.IsAny<ImportDecisionMakerConfig>()), Times.Once());
+
+                    var filesAfterScan = Db.All<TrackFile>().Select(x => x.Id).OrderBy(x => x).ToArray();
+                    Assert.That(filesAfterScan, Is.EqualTo(fileIdsBeforeScan),
+                        "Real stock scan altered track-file IDs while the sixth file was orphaned.");
+                    foreach (var entry in linksBeforeScan)
+                    {
+                        Assert.That(Db.All<Track>().Single(x => x.Id == entry.Key).TrackFileId,
+                            Is.EqualTo(entry.Value),
+                            "Real stock scan changed a track association before recovery.");
+                    }
+                    Assert.That(Db.All<LyricFile>().Select(x => x.Id).OrderBy(x => x).ToArray(),
+                        Is.EqualTo(lyricIdsBeforeScan),
+                        "Real stock scan altered registered lyrics before recovery.");
+                    Assert.That(File.Exists(physicalPaths[6]), Is.False,
+                        "The missing sixth original was unexpectedly recreated by scan.");
+                    Assert.That(File.ReadAllBytes(Path.Combine(staging, "06-synthetic.mp3")),
+                        Is.EqualTo(incomingBytes[6]), "Stock rescan consumed the staged sixth file.");
+                    for (var i = 1; i <= Total; i++)
+                    {
+                        Assert.That(File.ReadAllBytes(lyricPaths[i]), Is.EqualTo(lyricBytes[i]),
+                            "Physical lyric changed during rescan for track " + i);
+                    }
+                    Assert.That(Db.All<AlbumRelease>().Single(x => x.Id == release.Id).Monitored, Is.True,
+                        "Stock rescan switched the selected MusicBrainz release.");
+                    TestContext.Progress.WriteLine(
+                        "M14_SCAN_OBSERVED: real DiskScanService.Scan reached its decision stage; " +
+                        "opaque-media decisions suppressed; sixth remains missing/" +
+                        (realEventsDuringImport ? "unlinked by stock event" : "orphaned nonzero file ID") +
+                        ", staged bytes intact, " +
+                        "track-file IDs, track associations, lyrics and monitored release unchanged.");
+
+                    // The existing test-only repair below is still performed and validated.
+                    // Restore original services so the baseline recovery path remains
+                    // comparable to the already-characterized M12 test.
+                    Mocker.SetConstant<IMediaFileService>(originalMediaService);
+                    Mocker.SetConstant<IEventAggregator>(originalEventAggregator);
+                }
 
                 if (preserveInterruptedCheckpoint)
                 {
