@@ -32,7 +32,6 @@ namespace NzbDrone.Core.Test.MediaFiles
             _trackFile = new TrackFile
             {
                 Id = 51,
-                ArtistId = _artist.Id,
                 Artist = new LazyLoaded<Artist>(_artist)
             };
             _linkedLyric = new LyricFile
