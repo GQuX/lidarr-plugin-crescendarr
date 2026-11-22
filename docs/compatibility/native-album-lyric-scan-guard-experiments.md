@@ -1,6 +1,6 @@
 # P0: album-wide lyric and quarantined-original scan controls (test-only)
 
-**Status:** FIRST TWO CONTROLS VERIFIED, test-only. Source-pinned Linux native CI [45069316595](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45069316595) passed **67/67** main native tests, plus **1/1** checkpoint prepare and **1/1** separate-process recovery; pure planner [45069316627](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45069316627) passed. **Production write-enabled gate: NO-GO.**
+**Status:** THREE P0 CONTROLS VERIFIED, test-only. Source-pinned Linux native CI [45069594867](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45069594867) passed **68/68** main native tests, plus **1/1** checkpoint prepare and **1/1** separate-process recovery; pure planner [45069594779](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45069594779) passed. **Production write-enabled gate: NO-GO.**
 
 Refs: [issue #41](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/41), [M14 PR #39](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/39), [ADR-026](../architecture/adr-026-crash-safe-operation-journal.md). Unmodified pinned Lidarr v3.1.6.5079 with migrated SQLite and runtime-generated tagged silent audio on a disposable runner-local filesystem only.
 
@@ -18,6 +18,14 @@ A fully registered 12-track album scanned by stock `DiskScanService` produced ze
 - In a controlled test-only post-scan operation, insert **fresh** lyric rows against the newly read `TrackFileId` for each recording and re-verify authoritative artist-root/relative paths and physical lyric bytes.
 - **Not proven:** a crash during the album-wide detach, durable backup storage, an atomic host snapshot, an idempotent production journal, a complete real daemon subscriber graph, or an unattended safe commit. The interim absence of all lyric DB rows is itself a failure state requiring recovery.
 
+### Control A2: simulated interruption partway through album-wide lyric detachment
+
+- Independently back up and byte-verify **all 12** physical `.lrc` files before detaching anything.
+- Delete only the first **five** of eleven registered lyric DB rows; deliberately leave the unselected superior FLAC's lyric and five other lyrics registered. No production host or process is involved.
+- Invoke the native tagged stock scan with an unregistered sixth audio file. Assert exactly six still-registered physical lyrics are recycled; all detached physical lyrics stay put and all independent backups remain byte-identical.
+- Restore the six missing lyrics with **no-overwrite** local copies of their independent backups, reread every physical lyric, and insert *new* lyric rows referencing the new stock `TrackFileId` values. Verify all twelve host-relative paths and registrations.
+- **Observed in CI 45069594867:** `P0_PARTIAL_DETACH` records six recycled lyrics, successful exact-byte restoration and fresh reattachment of all twelve. This is a **test-controlled interruption**, not an actual process crash or a transactional scanner lock. It shows independent backups can make this specific dangerous mid-detach state *recoverable*, but it is not safe unattended or production-ready.
+
 ### Control B: hidden original quarantine before a pending fresh-row repair
 
 - Run the real sixth native incoming-transfer fault, with stock delete-event subscribers. Target-track lyrics are already DB-detached; the higher-quality protected FLAC lyric remains registered.
@@ -32,7 +40,7 @@ A fully registered 12-track album scanned by stock `DiskScanService` produced ze
 - **Quarantine while the plugin is absent:** After a real sixth-transfer fault with synchronous stock deletion handlers, two repeated native scans observed only already-linked library files; neither created new import decisions or recycled the protected FLAC's still-registered lyric. The original bytes persisted in a stock-excluded hidden directory, but track six remained unlinked. Log marker: `P0_QUARANTINE_SAFE`.
 - **Premature visible promotion:** A move of the hidden original to the final visible path **before** a valid fresh row/link triggered exactly the destructive tagged-audio whole-album rescan established in M14; the protected lyric was physically recycled and DB associations changed. Log marker: `P0_QUARANTINE_UNSAFE_PROMOTION`. This establishes that the quarantine trick on its own is **not a safe recovery protocol**.
 
-Next proof needed before any unattended write-enable: a crash or plugin absence midway through **partial lyric detachment**, verified recovery from independent durable backups, and an ordering mechanism (or fail-closed guard) that prevents a stock scan between quarantine promotion and authoritative file linkage. No such atomicity has been demonstrated.
+Next proof needed before any unattended write-enable: a **real process crash and restart** midway through album-wide lyric detachment with an independently durably persisted, versioned journal; operator-safe replay from fresh post-scan host state; and a **host-serializable or fail-closed promotion boundary** that prevents an unknown visible file from being scanned before authoritative row linkage. The simulated interruption above does not establish any such atomicity, and SMB durability is completely unproven.
 
 ## Decision criteria
 
