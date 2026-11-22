@@ -2,7 +2,8 @@ name: Native Lidarr safety characterization
 
 # Loads ORIGINAL Lidarr v3.1.6.5079 source in an ephemeral runner.
 # Only copies our test fixture into temporary checkout: no upstream repo writes.
-# Tests use mocks, not actual audio or a production Lidarr database.
+# Includes mocked-source fixtures and a real disposable SQLite/synthetic-byte import fixture.
+# No user audio, real download clients, or production Lidarr database.
 on:
   pull_request:
     paths:
@@ -52,7 +53,7 @@ jobs:
       # characterization before compilation. Disabling audit applies ONLY to this
       # ephemeral historical-source test and does not change package versions.
       # Never interpret this as production dependency safety.
-      - name: Run native importer, lyrics, completion and failure fixtures (all mocked)
+      - name: Run native importer, lyrics, completion, failure and disposable SQLite fixtures
         shell: bash
         run: |
           set -euo pipefail
@@ -62,4 +63,4 @@ jobs:
             --logger 'console;verbosity=normal' \
             -p:EnableAnalyzers=false \
             -p:NuGetAudit=false
-          echo "Native importer, lyric, download-completion and fault characterization PASSED in clean source checkout (mocked external effects)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Native import/lyric/download tests PASSED on disposable source, with mocks plus isolated SQLite and test-controlled physical byte moves" >> "$GITHUB_STEP_SUMMARY"
