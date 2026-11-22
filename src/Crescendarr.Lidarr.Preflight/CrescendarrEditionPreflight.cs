@@ -4,7 +4,6 @@
 using System;
 using System.Collections.Generic;
 using NzbDrone.Core.Configuration;
-using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Parser.Model;
 
