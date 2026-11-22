@@ -147,6 +147,17 @@ namespace NzbDrone.Core.Test.MediaFiles
         }
 
         [Test]
+        public void replace_existing_false_still_calls_set_monitored_on_release()
+        {
+            Subject.Import(_decisions, false);
+
+            // No whole-album pre-delete does not imply an immutable edition.
+            // Lidarr still invokes SetMonitored for the first approved release.
+            Mocker.GetMock<IReleaseService>()
+                .Verify(s => s.SetMonitored(It.IsAny<AlbumRelease>()), Times.Once());
+        }
+
+        [Test]
         public void replace_existing_false_avoids_album_wipe_but_still_delegates_11_upgrades()
         {
             var results = Subject.Import(_decisions, false);
