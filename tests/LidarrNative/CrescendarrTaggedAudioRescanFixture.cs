@@ -62,6 +62,9 @@ namespace NzbDrone.Core.Test.MediaFiles
             /// <summary>Baseline control: all twelve stock tracks and lyrics already registered; no unknown file.</summary>
             CleanFullyLinkedBaseline,
 
+            /// <summary>Unknown track, but protected lyric uses an ordinary "12 - Track Name.lrc" filename.</summary>
+            ConventionalProtectedLyricName,
+
             /// <summary>No import: track six simply has a valid, unregistered file. Proves a real decision is made.</summary>
             ControlUnlinkedValidFile,
 
@@ -77,12 +80,14 @@ namespace NzbDrone.Core.Test.MediaFiles
 
         [TestCase(Scenario.CleanFullyLinkedBaseline)]
         [TestCase(Scenario.ControlUnlinkedValidFile)]
+        [TestCase(Scenario.ConventionalProtectedLyricName)]
         [TestCase(Scenario.RestoredOriginalBeforeFreshRow)]
         [TestCase(Scenario.IncomingTransferredButUnlinked)]
         [TestCase(Scenario.ScanInterleavedInsideImporter)]
         public void native_tagged_audio_rescan_characterization(Scenario scenario)
         {
-            var w = BuildWorld(sixthUnlinkedFromStart: scenario == Scenario.ControlUnlinkedValidFile);
+            var w = BuildWorld(sixthUnlinkedFromStart: scenario == Scenario.ControlUnlinkedValidFile || scenario == Scenario.ConventionalProtectedLyricName,
+                conventionalProtectedLyric: scenario == Scenario.ConventionalProtectedLyricName);
             WireRealEventsAndStockDisk(w);
             var recorder = WireRealScan(w);
 
@@ -110,6 +115,23 @@ namespace NzbDrone.Core.Test.MediaFiles
                 foreach (var i in Enumerable.Range(1, Total))
                     Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]),
                         $"fully linked baseline unexpectedly modified physical lyric {i}");
+                AssertHeldInvariants(w, scenario);
+                return;
+            }
+
+            if (scenario == Scenario.ConventionalProtectedLyricName)
+            {
+                var protectedLyric = w.LyricPaths[Total];
+                Assert.That(Path.GetFileName(protectedLyric), Is.EqualTo("12 - Synthetic Track 12.lrc"));
+                var parsed = NzbDrone.Core.Parser.Parser.ParseMusicPath(protectedLyric);
+                Log($"M14_TAGGED_CONVENTIONAL_LYRIC parsed={(parsed != null)} " +
+                    $"trackNumbers=[{string.Join(",", parsed?.TrackNumbers ?? Array.Empty<int>())}] filename={Path.GetFileName(protectedLyric)}");
+                var scan = RunRealScan(w, recorder, "conventional-protected-lyric");
+                AssertStockFullAlbumRescanCascade(w, scan, scenario);
+                Assert.That(File.Exists(protectedLyric), Is.False,
+                    "even a conventionally named registered lyric was physically recycled before rediscovery");
+                Assert.That(Db.All<LyricFile>(), Is.Empty,
+                    "existing-lyric importer could not recover a lyric already recycled by native delete handlers");
                 AssertHeldInvariants(w, scenario);
                 return;
             }
@@ -429,7 +451,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             }.Write(path);
         }
 
-        private World BuildWorld(bool sixthUnlinkedFromStart)
+        private World BuildWorld(bool sixthUnlinkedFromStart, bool conventionalProtectedLyric = false)
         {
             var w = new World { Temp = Path.Combine(TestFolderInfo.AppDataFolder, "crescendarr-m14-tagged") };
             w.Library = Path.Combine(w.Temp, "library", "synthetic-artist", "synthetic-album");
@@ -489,7 +511,8 @@ namespace NzbDrone.Core.Test.MediaFiles
                 var flac = i == Total;
                 w.OwnedPaths[i] = Path.Combine(w.Library, stem + (flac ? ".flac" : ".mp3"));
                 w.IncomingPaths[i] = Path.Combine(w.Staging, stem + ".mp3");
-                w.LyricPaths[i] = Path.Combine(w.Library, stem + ".lrc");
+                w.LyricPaths[i] = Path.Combine(w.Library,
+                    conventionalProtectedLyric && i == Total ? "12 - Synthetic Track 12.lrc" : stem + ".lrc");
                 w.BackupPaths[i] = Path.Combine(w.Backups, Path.GetFileName(w.OwnedPaths[i]));
 
                 var ownedAudio = flac ? SyntheticFlac(TrackSeconds(i), out var durationMs) : SilentMp3(192, TrackSeconds(i), out durationMs);
