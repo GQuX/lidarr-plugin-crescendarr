@@ -1,7 +1,6 @@
 // ORIGINAL Crescendarr test fixture for an EPHEMERAL pinned Lidarr checkout.
 // Uses only Moq; no music file, database, NAS, or user configuration is touched.
 // Expected test passes document unsafe stock behavior, NOT a proposed fix.
-using System;
 using System.Collections.Generic;
 using System.IO;
 using Moq;
@@ -81,7 +80,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.Throws<IOException>(() => Subject.UpgradeTrackFile(_incoming, _candidate));
             Assert.That(steps, Is.EqualTo(new[] { "delete-original", "delete-db-mapping", "move-attempt" }));
             Mocker.GetMock<IAudioTagService>()
-                .Verify(s => s.WriteTags(It.IsAny<TrackFile>(), It.IsAny<bool>()), Times.Never());
+                .Verify(s => s.WriteTags(It.IsAny<TrackFile>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never());
         }
 
         [Test]
