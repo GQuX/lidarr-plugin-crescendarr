@@ -42,14 +42,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          core="$(find "${RUNNER_TEMP}/lidarr-runtime" -type f -name NzbDrone.Core.dll -print -quit)"
+          core="$(find "${RUNNER_TEMP}/lidarr-runtime" -type f -name Lidarr.Core.dll -print -quit)"
           if [[ -z "$core" ]]; then
             echo 'NzbDrone.Core.dll not found in pinned binary release. Inspect the published assembly names.' >&2
-            find "${RUNNER_TEMP}/lidarr-runtime" -type f -name '*.dll' | head -50 >&2
+            find "${RUNNER_TEMP}/lidarr-runtime" -type f \\( -name 'Lidarr*.dll' -o -name 'NzbDrone*.dll' \\) >&2 || true
             exit 1
           fi
           dir="$(dirname "$core")"
-          for name in NzbDrone.Common.dll NLog.dll System.IO.Abstractions.dll; do
+          for name in Lidarr.Common.dll NLog.dll System.IO.Abstractions.dll; do
             if [[ ! -f "$dir/$name" ]]; then
               echo "Required pinned host reference missing: $name" >&2
               exit 1
