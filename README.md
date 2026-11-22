@@ -9,7 +9,7 @@
 
 An independent review, followed by [Lidarr source verification](docs/reviews/2026-11-22-independent-review-triage.md), found a destructive mismatch: stock Lidarr can delete an entire album before selective imports, recycle/delete linked extras, and retry without plugins after some startup failures.
 
-**Do not pursue IDownloadedTracksImportService as a write-enabled release mechanism.** The current probe characterizes disposable-host dependency injection only. Priority is [native import characterization (#6)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/6), [completion/lyrics/recovery (#7)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/7), and upstream compatibility with [PR #6166](https://github.com/Lidarr/Lidarr/pull/6166). The single-plugin goal is conditional on a safe host integration point.
+**Do not pursue IDownloadedTracksImportService as a write-enabled release mechanism.** The current probe characterizes disposable-host dependency injection only. Priority is [native import characterization (#6)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/6), [completion/lyrics/recovery (#7)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/7), and upstream compatibility with [PR #6166](https://github.com/Lidarr/Lidarr/pull/6166). The single-plugin goal is conditional on a safe host integration point. Our [host-owned recoverable import design v0.1](docs/architecture/host-recoverable-import-protocol-v0.1.md) is an **unimplemented, unreviewed proposal**, not an existing Lidarr capability.
 
 ## What we are building
 
