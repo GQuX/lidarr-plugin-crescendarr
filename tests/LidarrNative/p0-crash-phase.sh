@@ -25,6 +25,10 @@ if [ "$expect" = killed ]; then
   echo "P0 $phase: test host SIGKILLed at its crash point (dotnet test rc=$rc): $(cat "$root/kill-$phase.evidence")" | tee -a "$GITHUB_STEP_SUMMARY"
 else
   if [ "$rc" -ne 0 ]; then echo "::error::$phase failed (rc=$rc)"; exit "$rc"; fi
-  if ! grep -qE 'Passed!.*Passed: +[1-9]' "$log"; then echo "::error::$phase ran no passing test"; exit 1; fi
-  echo "P0 $phase: $(grep -E 'Passed!' "$log" | tail -1)" | tee -a "$GITHUB_STEP_SUMMARY"
+  # Console logger summary is multi-line: "Total tests: N" then "Passed: N".
+  if ! grep -qE '^[[:space:]]*Passed: +[1-9]' "$log" || grep -qE '^[[:space:]]*Failed: +[1-9]' "$log"; then
+    echo "::error::$phase ran no passing test"; exit 1
+  fi
+  echo "P0 $phase: $(grep -E '^[[:space:]]*(Total tests|Passed|Failed|Skipped):' "$log" | tr -s ' ' | tr '
+' ' ')" | tee -a "$GITHUB_STEP_SUMMARY"
 fi
