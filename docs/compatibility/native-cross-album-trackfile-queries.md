@@ -1,6 +1,6 @@
 # M15: read-only cross-album TrackFile reference discovery
 
-**Status:** DRAFT / test-only. Native CI and separate independent review required. **Production write-enabled gate: NO-GO.** Linked issue: [#40](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/40).
+**Status:** VERIFIED FIRST INCREMENT, draft / test-only. [Native CI 45070164250](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45070164250) on `fb2a941` passes **66/66** native tests plus **1/1 + 1/1** separate-process recovery stages; [planner CI 45070164209](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45070164209) passes. Independent review remains required. **Production write-enabled gate: NO-GO.** Linked issue: [#40](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/40).
 
 ## Source-verified stock query
 
@@ -23,6 +23,16 @@ That is a **source-level candidate** for the host adapter's cross-album safety e
 5. Assert the batched file-ID query returns every relevant link and that unrelated sharing is also fully visible for later per-operation filtering.
 
 **The negative album-only result is essential:** M13's X06 reconciler can detect cross-album sharing only if the supplying host adapter includes those tracks. A partial `HostSnapshot` cannot be called safe merely because the pure reconciler returned a completed verdict.
+
+## Verified result
+
+Actual native SQLite log marker from CI run 45070164250:
+
+```text
+M15_CROSS_ALBUM_QUERY: boundTrack=1 crossAlbumAlias=2 fileId=1 globalMatches=2 albumOnlyMatches=2 albumOnlyMissesAlias=True batchedMatches=4 unrelatedSharedMatches=2
+```
+
+This directly establishes that both the single-ID and batch-ID stock repository queries can observe another album's linked track; a target-album-only query sees the target-album tracks but **misses the cross-album alias**. Unrelated shared-file links also remain visible. The result is a read-only repository characterization, **not** a host adapter, atomic snapshot or per-track merge.
 
 ## Next integration gates (not claimed here)
 
