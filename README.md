@@ -46,7 +46,7 @@ No NuGet test framework dependency is needed. **GitHub Actions compiled and exec
 
 Read [disposable host protocol](docs/safety/disposable-host.md). The test-only probe requires exact disposable-host opt-in, a sentinel file and an explicit synthetic-root allowlist. It intentionally returns empty import decisions, which may cause *Lidarr's own* queue/import state to change. Use it only in an isolated host with a fresh disposable DB and no real downloads.
 
-The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0143ede18135fe` is not an endorsed plugin interception API. We must prove type selection, startup, original concrete resolution and unload before designing a write-enabled plugin. A DI wrapper alone would **not** solve completion/edition/lyrics safety.
+The [first disposable runtime test](docs/compatibility/disposable-runtime-evidence.md) showed the test-only service selected and a synthetic `ProcessPath` intercepted. **This is not a supported API nor proof of safe automatic imports.** The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0143ede18135fe` is not an endorsed plugin interception API. We must prove type selection, startup, original concrete resolution and unload before designing a write-enabled plugin. A DI wrapper alone would **not** solve completion/edition/lyrics safety.
 
 ## Documentation
 
@@ -63,7 +63,8 @@ The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0
 - [x] Disposable Portainer example, lint and 16 Python safety regression tests (passed in authoring environment)
 - [x] .NET 8 pure-core compile and 29/29 synthetic specs passed in [GitHub Actions](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45018712104)
 - [x] Test-only adapter compiled against checksum-pinned Lidarr 3.1.6.5079 Linux binaries ([compile-only CI](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45019459665))
-- [ ] Disposable Lidarr host and DI comparison
+- [x] Disposable Lidarr v3.1.6.5079 host selected the test-only importer and intercepted a synthetic call ([CI evidence](docs/compatibility/disposable-runtime-evidence.md))
+- [ ] Actual download lifecycle, no-improvement and partial-upgrade settlement, clean uninstall/fallback, unsupported-version behavior
 - [ ] Supported pre-import contract with truthful zero/partial/full outcomes
 - [ ] Verified `.lrc` preservation, edition lock and recoverable SMB-safe upgrades
 - [ ] Build a real installable plugin
@@ -88,3 +89,7 @@ are advisory: only a host-owned revalidation and recoverable import executor can
 [Lidarr PR #6166](https://github.com/Lidarr/Lidarr/pull/6166) (open and unmerged when checked on 2026-11-22) proposes song selection, selective imports, and queue-aware recording intent. That work may supply a safer host-owned seam or make some Crescendarr functionality redundant. We are tracking its changes before considering any upstream submission. The PR does **not** on its own verify our automatic album-download upgrade rules, edition-lock guarantees, `.lrc` handling, crash recovery, or SMB-safe replacement semantics. See [upstream overlap notes](docs/architecture/upstream-overlap-pr6166.md).
 
 **Host ABI check:** `.github/workflows/probe-abi.yml` downloads the pinned `v3.1.6.5079` Linux x64 release, checks SHA-256, discovers `Lidarr.Core.dll` and `Lidarr.Common.dll`, and compiles the non-installable adapter. It never executes Lidarr or installs the probe. A green result is **not** permission to test on a real library.
+
+## Disposable runtime milestone (2026-11-22)
+
+[GitHub Actions #45020067092](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45020067092) started stock Lidarr v3.1.6.5079 with a new empty database and our guarded probe, confirmed DryIoc chose the Crescendarr service, resolved Lidarr's concrete original without recursion, and intercepted exactly one synthetic test method call. **No real download-client job, import, replacement, .lrc sidecar, or crash recovery was tested.** [Evidence and limitations](docs/compatibility/disposable-runtime-evidence.md).
