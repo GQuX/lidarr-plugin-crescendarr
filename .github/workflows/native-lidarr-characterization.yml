@@ -1,0 +1,64 @@
+name: Native Lidarr 12-track characterization
+
+# Loads ORIGINAL Lidarr v3.1.6.5079 source in an ephemeral runner.
+# Only copies our test fixture into temporary checkout: no upstream repo writes.
+# Tests use mocks, not actual audio or a production Lidarr database.
+on:
+  pull_request:
+    paths:
+      - 'tests/LidarrNative/**'
+      - '.github/workflows/native-lidarr-characterization.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-characterization:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: crescendarr
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Lidarr/Lidarr
+          # Commit underlying official stable v3.1.6.5079 tag, not a moving branch.
+          ref: da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd
+          path: upstream-lidarr
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Verify pinned Lidarr source revision and stage original characterization tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git -C upstream-lidarr rev-parse HEAD)"
+          test "$actual" = "da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd"
+          cp crescendarr/tests/LidarrNative/CrescendarrAlbumUpgradeCharacterizationFixture.cs \
+            upstream-lidarr/src/NzbDrone.Core.Test/MediaFiles/CrescendarrAlbumUpgradeCharacterizationFixture.cs
+          # Upstream Core.Test relies on a platform assembly loaded via Assembly.Load
+          # in AutoMoqer. An isolated test-project-only build does not stage it.
+          # Add the normal Linux platform project only in this throwaway checkout.
+          dotnet add upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj reference \
+            upstream-lidarr/src/NzbDrone.Mono/Lidarr.Mono.csproj
+          echo "Upstream source pinned at $actual, characterization fixture staged in ephemeral checkout" >> "$GITHUB_STEP_SUMMARY"
+      # The 2026 NuGet advisory database flags a historical ImageSharp dependency
+      # in this exact 2026 Lidarr source; its original TreatWarningsAsErrors blocks
+      # characterization before compilation. Disabling audit applies ONLY to this
+      # ephemeral historical-source test and does not change package versions.
+      # Never interpret this as production dependency safety.
+      - name: Execute native importer + quality specification fixture (no actual media)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test upstream-lidarr/src/NzbDrone.Core.Test/Lidarr.Core.Test.csproj \
+            --configuration Debug \
+            --filter 'FullyQualifiedName~CrescendarrAlbumUpgradeCharacterizationFixture' \
+            --logger 'console;verbosity=normal' \
+            -p:EnableAnalyzers=false \
+            -p:NuGetAudit=false
+          echo "Native importer characterization PASSED in a clean source checkout" >> "$GITHUB_STEP_SUMMARY"

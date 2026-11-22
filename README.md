@@ -71,6 +71,7 @@ The [first disposable runtime test](docs/compatibility/disposable-runtime-eviden
 - [x] Test-only adapter compiled against checksum-pinned Lidarr 3.1.6.5079 Linux binaries ([compile-only CI](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45019459665))
 - [x] Disposable Lidarr v3.1.6.5079 host selected the test-only importer and intercepted a synthetic call ([CI evidence](docs/compatibility/disposable-runtime-evidence.md))
 - [x] Isolated baseline, missing opt-in, and positive synthetic-interception tests ([CI #45020330835](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45020330835))
+- [x] Lidarr-native 12-track characterization ([3/3 NUnit tests](docs/compatibility/native-12-track-characterization.md)): stock `replaceExisting=true` pre-deletes even the better track; `false` skips only album-wide pre-wipe but still calls `SetMonitored`
 - [ ] Real import caller, no-improvement and partial-upgrade settlement, clean unload/fallback, unsupported-version and multi-plugin behavior
 - [ ] Supported pre-import contract with truthful zero/partial/full outcomes
 - [ ] Verified `.lrc` preservation, edition lock and recoverable SMB-safe upgrades
