@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- TEST ONLY: a separate observer probe that NEVER overrides import services. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Lidarr.Plugin.Crescendarr.ObserverProbe</AssemblyName>
+    <RootNamespace>NzbDrone.Core</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <Target Name="RequireDisposableRunner" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(CrescendarrDisposableHostBuild)' != 'true'" Text="TEST ONLY: observer must be built with explicit disposable-host opt-in."/>
+    <Error Condition="'$(LidarrBinDir)' == ''" Text="Pass the verified, disposable LidarrBinDir path."/>
+  </Target>
+  <ItemGroup>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
