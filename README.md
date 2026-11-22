@@ -43,6 +43,12 @@ An incremental [stock-Lidarr integration test](docs/compatibility/native-sqlite-
 
 **This is not production-safe media merging.** The `.mp3` and `.flac` names wrap non-audio synthetic bytes; native audio tag reading/writing, complete identification and stock disk mover/recycler are still excluded, and the event aggregator is mocked. No process crash/restart, rescan race, actual download, multi-edition or SMB durability test has passed. No write-enabled plugin release exists.
 
+## Interrupted SQLite recovery across separate test processes
+
+[Cross-process native recovery CI](docs/compatibility/native-cross-process-sqlite-recovery.md) now passes on the pinned, unmodified Lidarr source: **36/36 base native tests, 1/1 interrupted-checkpoint preparation and 1/1 recovery in a separate new test process** ([GitHub Actions evidence](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45039966505)). The first process saves a consistent migrated SQLite snapshot after the sixth replacement is interrupted. The second process reopens that snapshot and uses native Lidarr repository/service methods to restore the original test bytes and all track/lyric associations while preserving the other ten upgrades and the better twelfth file.
+
+**This is not an actual Lidarr server restart or crash recovery implementation.** Native event dispatch, rescan races, journaling, actual stock disk transfer, valid tagged audio and SMB durability are still untested. All media are opaque test bytes on a disposable runner, not any user's library. Crescendarr remains non-installable and unsafe for production.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
