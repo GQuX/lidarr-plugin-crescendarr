@@ -13,7 +13,7 @@ The current source is **only**:
 
 - `src/Crescendarr.Core/`: pure deterministic merge planner. No Lidarr references, no disk/database/network access, and no file-write operations.
 - `tests/Crescendarr.Core.Spec/`: standalone executable specifications using synthetic identities and a **fake** quality policy. They do not validate Lidarr's real quality profiles.
-- `src/Crescendarr.Lidarr.Probe/`: deliberately non-delegating, test-only registration experiment. It has **no installer, no release workflow** and must not be put into production Lidarr.
+- `src/Crescendarr.Lidarr.Probe/`: deliberately non-delegating, test-only registration experiment. It has **no installer, no release workflow** and must not be put into production Lidarr. A **compile-only** CI run now verifies its ABI references against an upstream binary release; this does not load or execute the adapter.
 - `deploy/portainer/disposable-lidarr-stable.compose.yml`: no-production-mount disposable host example (separate `/config`, port 8687); this does **not** install the probe.
 - `tools/check_disposable_compose.py` and `tools/tests/`: development-only Compose lint plus 16 regression checks for unsafe configuration.
 - `docs/`: pinned compatibility hypotheses, safety boundaries, Portainer guide, experiment protocol and report template.
@@ -62,6 +62,7 @@ The source-pinned Lidarr import interface at commit `a754943cbd85cf9257e984506e0
 - [x] Experimental host-probe source authored
 - [x] Disposable Portainer example, lint and 16 Python safety regression tests (passed in authoring environment)
 - [x] .NET 8 pure-core compile and 29/29 synthetic specs passed in [GitHub Actions](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45018712104)
+- [x] Test-only adapter compiled against checksum-pinned Lidarr 3.1.6.5079 Linux binaries ([compile-only CI](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45019459665))
 - [ ] Disposable Lidarr host and DI comparison
 - [ ] Supported pre-import contract with truthful zero/partial/full outcomes
 - [ ] Verified `.lrc` preservation, edition lock and recoverable SMB-safe upgrades
@@ -78,10 +79,12 @@ Use **a new Portainer stack**, not the production multi-service stack. The lab C
 Lidarr stable v3.1.6.5079 has plugin loading in its tagged source and targets net8.0.
 This source now targets .NET 8. Production Lidarr is a **compatibility reference only**.
 The operator confirmed an independent backup and Watchtower exclusion; **no probe may be installed**
-on that live container. The pure .NET 8 planner compiled and passed 29/29 synthetic specifications in GitHub Actions. The host interception probe is still uncompiled and untested.
+on that live container. The pure .NET 8 planner compiled and passed 29/29 synthetic specifications in GitHub Actions. The test-only host interception probe now **compiles** against the checksum-pinned stable Lidarr release; runtime loading, DI selection, and safety behavior remain untested.
 Full input snapshot hashing is now included in merge plan identifiers, but these fingerprints
 are advisory: only a host-owned revalidation and recoverable import executor can authorize writes.
 
 ## Upstream overlap
 
 [Lidarr PR #6166](https://github.com/Lidarr/Lidarr/pull/6166) (open and unmerged when checked on 2026-11-22) proposes song selection, selective imports, and queue-aware recording intent. That work may supply a safer host-owned seam or make some Crescendarr functionality redundant. We are tracking its changes before considering any upstream submission. The PR does **not** on its own verify our automatic album-download upgrade rules, edition-lock guarantees, `.lrc` handling, crash recovery, or SMB-safe replacement semantics. See [upstream overlap notes](docs/architecture/upstream-overlap-pr6166.md).
+
+**Host ABI check:** `.github/workflows/probe-abi.yml` downloads the pinned `v3.1.6.5079` Linux x64 release, checks SHA-256, discovers `Lidarr.Core.dll` and `Lidarr.Common.dll`, and compiles the non-installable adapter. It never executes Lidarr or installs the probe. A green result is **not** permission to test on a real library.
