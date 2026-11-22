@@ -79,6 +79,17 @@ namespace NzbDrone.Core.Test.MediaFiles
                 useStockDiskPipeline: true, scanBeforeRecovery: true);
         }
 
+        // Compare a more host-like failure: native synchronous deletion handlers were
+        // registered BEFORE the failing importer, not added only for the later scan.
+        // This can change whether track 6 retains a dangling ID or becomes unlinked.
+        [Test]
+        public void native_delete_event_fanout_before_scan_then_recovers_sixth_transfer_failure()
+        {
+            RunSelectiveImport(failAtSix: true, preserveInterruptedCheckpoint: false,
+                useStockDiskPipeline: true, scanBeforeRecovery: true,
+                realEventsDuringImport: true);
+        }
+
         // Called only by an explicit, isolated CI step; never in the normal suite.
         // The source-pinned DbTest database is exported before its teardown and
         // checked in a different dotnet test process by the companion fixture.
@@ -92,7 +103,8 @@ namespace NzbDrone.Core.Test.MediaFiles
 
         private void RunSelectiveImport(bool failAtSix, bool preserveInterruptedCheckpoint,
             bool useStockDiskPipeline = false, bool withCompetingEdition = false,
-            bool incomingAlternateEdition = false, bool scanBeforeRecovery = false)
+            bool incomingAlternateEdition = false, bool scanBeforeRecovery = false,
+            bool realEventsDuringImport = false)
         {
             var restartRoot = Environment.GetEnvironmentVariable("CRESCENDARR_M12_RESTART_ROOT");
             if (preserveInterruptedCheckpoint)
@@ -282,7 +294,43 @@ namespace NzbDrone.Core.Test.MediaFiles
             Mocker.SetConstant<IMediaFileRepository>(Mocker.Resolve<MediaFileRepository>());
             Mocker.SetConstant<ITrackRepository>(Mocker.Resolve<TrackRepository>());
             Mocker.SetConstant<IReleaseRepository>(Mocker.Resolve<ReleaseRepository>());
-            Mocker.SetConstant<IMediaFileService>(Mocker.Resolve<MediaFileService>());
+
+            IEventAggregator importerBus = null;
+            if (realEventsDuringImport)
+            {
+                // Unlike the older M12 fixture, register ACTUAL stock synchronous
+                // TrackFileDeletedEvent handlers BEFORE the sixth-file failure.
+                // Native media deletion should now publish to real TrackService
+                // (DetachTrackFile) and LyricFileService on the real SQLite state.
+                var trackService = Mocker.Resolve<TrackService>();
+                Mocker.SetConstant<ITrackService>(trackService);
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandle<TrackFileDeletedEvent>>())
+                    .Returns(new List<IHandle<TrackFileDeletedEvent>>
+                    {
+                        trackService,
+                        lyrics
+                    });
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandleAsync<IEvent>>())
+                    .Returns(new List<IHandleAsync<IEvent>>());
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandleAsync<TrackFileDeletedEvent>>())
+                    .Returns(new List<IHandleAsync<TrackFileDeletedEvent>>());
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandle<TrackFileAddedEvent>>())
+                    .Returns(new List<IHandle<TrackFileAddedEvent>>());
+                Mocker.GetMock<IServiceFactory>()
+                    .Setup(x => x.BuildAll<IHandleAsync<TrackFileAddedEvent>>())
+                    .Returns(new List<IHandleAsync<TrackFileAddedEvent>>());
+                importerBus = Mocker.Resolve<EventAggregator>();
+                Mocker.SetConstant<IEventAggregator>(importerBus);
+            }
+
+            Mocker.SetConstant<IMediaFileService>(realEventsDuringImport
+                ? new MediaFileService(Mocker.Resolve<IMediaFileRepository>(), importerBus,
+                    NLog.LogManager.GetLogger("CrescendarrM14NativeEventsDuringImport"))
+                : Mocker.Resolve<MediaFileService>());
             Mocker.SetConstant<ITrackService>(Mocker.Resolve<TrackService>());
             Mocker.SetConstant<IReleaseService>(Mocker.Resolve<ReleaseService>());
 
@@ -417,8 +465,21 @@ namespace NzbDrone.Core.Test.MediaFiles
                 // the old file was recycled and its TrackFile row is gone, while the
                 // incoming sixth file is still in staging and lyrics were DB-unlinked.
                 var orphan = Db.All<Track>().Single(x => x.AbsoluteTrackNumber == 6);
-                Assert.That(orphan.TrackFileId, Is.EqualTo(previous[6].Id));
-                Assert.That(Db.All<TrackFile>().Any(x => x.Id == orphan.TrackFileId), Is.False);
+                if (realEventsDuringImport)
+                {
+                    // With actual synchronous stock deletion subscribers, the
+                    // ghost reference should be cleared by TrackService.Handle.
+                    Assert.That(orphan.TrackFileId, Is.EqualTo(0),
+                        "Real stock TrackFileDeletedEvent did not detach track six.");
+                    TestContext.Progress.WriteLine(
+                        "M14_REAL_EVENT_FAULT_OBSERVED: stock deletion handlers detached track 6 " +
+                        "before the scan; sixth TrackFile DB row gone and original bytes recycled.");
+                }
+                else
+                {
+                    Assert.That(orphan.TrackFileId, Is.EqualTo(previous[6].Id));
+                }
+                Assert.That(Db.All<TrackFile>().Any(x => x.Id == previous[6].Id), Is.False);
                 Assert.That(File.Exists(physicalPaths[6]), Is.False);
                 Assert.That(File.Exists(Path.Combine(staging, "06-synthetic.mp3")), Is.True);
                 var sixthRecycled = useStockDiskPipeline
