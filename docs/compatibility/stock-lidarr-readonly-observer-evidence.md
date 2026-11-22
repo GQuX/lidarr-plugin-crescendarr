@@ -32,7 +32,7 @@ The fixture instantiates **actual stock `DownloadMonitoringService`**, with a mo
 
 Source: [`DownloadMonitoringService.Refresh()` and `DownloadIsTrackable`](https://github.com/Lidarr/Lidarr/blob/v3.1.6.5079/src/NzbDrone.Core/Download/TrackedDownloads/DownloadMonitoringService.cs#L60-L153). This is a source-native **mocked-client** behavior test, not evidence that the observer plugin received a live item.
 
-Earlier [stock CDH boundary tests](stock-lidarr-cdh-off-boundary.md) establish that CDH OFF blocks normal automatic importing of pending completed items, but **does not** disable removal notifications for jobs already marked imported and removable. No universal cleanup guarantee should be inferred.
+Earlier [stock CDH boundary tests](../architecture/stock-lidarr-plugin-only-feasibility-v0.1.md) establish that CDH OFF blocks normal automatic importing of pending completed items, but **does not** disable removal notifications for jobs already marked imported and removable. No universal cleanup guarantee should be inferred.
 
 ## Narrow result and next gate
 
