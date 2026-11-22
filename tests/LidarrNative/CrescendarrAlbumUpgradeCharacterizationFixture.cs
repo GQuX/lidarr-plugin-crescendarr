@@ -17,9 +17,9 @@ using NzbDrone.Core.Datastore;
 using NzbDrone.Core.DecisionEngine;
 using NzbDrone.Core.MediaFiles;
 using NzbDrone.Core.MediaFiles.Events;
-using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.MediaFiles.TrackImport;
 using NzbDrone.Core.MediaFiles.TrackImport.Specifications;
+using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Music;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.Profiles.Qualities;
@@ -182,6 +182,7 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(results.Count(r => r.Result == ImportResultType.Rejected),
                 Is.EqualTo(1));
         }
+
         [Test]
         public void late_trackfile_bulk_insert_failure_follows_all_11_selected_upgrades()
         {
@@ -207,7 +208,7 @@ namespace NzbDrone.Core.Test.MediaFiles
         }
 
         [Test]
-        public void sixth_upgrade_failure_still_allows_ten_imports_and_one_failed_approved_decision()
+        public void sixth_upgrade_failure_still_allows_ten_imports_and_one_skipped_approved_decision()
         {
             // Native ImportApprovedTracks catches the sixth upgrader fault and continues.
             // This proves control-flow only, not that the eleven originals remain intact.
@@ -229,6 +230,8 @@ namespace NzbDrone.Core.Test.MediaFiles
             Assert.That(calls, Is.EqualTo(ExpectedUpgrades));
             Assert.That(results.Count, Is.EqualTo(AlbumTrackCount));
             Assert.That(results.Count(r => r.Result == ImportResultType.Imported), Is.EqualTo(10));
+            // Stock ImportResult reports an approved candidate with an import error as Skipped.
+            Assert.That(results.Count(r => r.Result == ImportResultType.Skipped), Is.EqualTo(1));
             Assert.That(results.Count(r => r.ImportDecision.Approved && r.Errors.Count > 0), Is.EqualTo(1));
             Assert.That(results.Count(r => !r.ImportDecision.Approved), Is.EqualTo(1));
 
