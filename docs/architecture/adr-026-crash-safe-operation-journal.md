@@ -1,6 +1,6 @@
 # ADR-026: Crash-safe per-track operation journal and disposable recovery lab (M13)
 
-**Status:** DRAFT, revision 2 after the independent review of PR #37 (findings A, B and C, below). Lab only. **NO-GO for any write-enabled plugin**: host transactionality is unproven.
+**Status:** DRAFT, revision 3 after two independent reviews of PR #37 (findings A, B and C, and the shared fresh-row finding, below). Lab only. **NO-GO for any write-enabled plugin**: host transactionality is unproven.
 **Issue:** [#35](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/35). **Date:** 2026-11-22.
 **Evidence it is built on:** [native-sixth-transfer-failure](../compatibility/native-sixth-transfer-failure.md), [native-two-edition-sqlite-import](../compatibility/native-two-edition-sqlite-import.md), [native-event-dispatch-sqlite](../compatibility/native-event-dispatch-sqlite.md), [native-cross-process-sqlite-recovery](../compatibility/native-cross-process-sqlite-recovery.md).
 
@@ -96,6 +96,7 @@ Any of these yields `RequiresReview` and zero automatic actions other than recor
 - two host track-file rows, or two lyric rows, share a path **ignoring case**; or any host path is not clean NFC text;
 - before the native step, any row other than the bound original at a track's original or destination path;
 - a bound original track file linked to any other track;
+- any row the operation created or relies on (the recorded fresh ID, or while the native step is in flight any non-original row at the track's destination or original path) linked to any other track;
 - duplicate track IDs;
 - album changed;
 - not exactly one monitored release, or the monitored MusicBrainz release changed;
@@ -237,6 +238,31 @@ The review ([comment](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/37#
 - **The spec runner reported a spec that returned early on an unsupported host as PASS.** It now prints `NOT_EXECUTED` and counts it separately (`JOURNAL_SPEC_TOTALS`).
 - **Suspected, not reproduced:** a hardlink planted at the operation-owned backup path, followed by a backup resume that opens the destination for writing. That could truncate the original's inode. In X05, run against the old code, .NET's emulated sharing lock made the write fail first on both Windows and Linux. That lock is a .NET convention, not an OS guarantee, so copies now go to a fresh `CreateNew` temp file that is renamed into place. X05 asserts that the verified backup holds the original bytes and the operation completes.
 
+## Revision 3: shared fresh track-file row (second review of PR #37)
+
+The second review ([comment](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/37#issuecomment-7083721396)) suspected that a fresh destination row could be shared with an unrelated track without blocking reconciliation.
+
+- **Reproduced.** Spec X06 was added fail-first in commit `cdaebb4`, against `775f656`. In every case the only host change was relinking a track to the fresh row; no file bytes, paths or IDs were duplicated.
+
+  | Case | Setup | Unfixed result |
+  |---|---|---|
+  | 1. Interrupted native | Crash after `native.101.afterLink` (host linked, journal not yet recorded), then protected track 104 relinked to track 101's fresh row | reached `Completed` |
+  | 2. Already upgraded | Crash after `native.101.afterPublish` (fresh ID recorded), same relink | reached `Completed` |
+  | 3. Extra track | An unbound extra track linked to the recorded fresh row | reached `Completed` |
+  | 4. Legitimate sharing | Two unbound tracks sharing the protected file, which the operation never touches | completed (correct) |
+
+- **Root cause.** The isolation check in `GlobalChecks` covered only `OriginalTrackFileId`, and only before `Upgraded`. Case E (native observed complete) and the `Upgraded` and `LyricRelinked` checks validated the bound track's own link, but never asked whether another track also linked to that row.
+- **Fix (smallest safe change, `Reconciler.GlobalChecks`).** Per-track isolation now covers every row the operation creates or relies on:
+  - the journal's recorded `NewTrackFileId`;
+  - while `NativeUpgrade` is in flight, any non-original row at the track's destination or original path, meaning the candidate fresh row or an operator-approved rollback row.
+
+  If any other track links to one of these, the reconciler returns review before any further step, including recording success. Shared files that the operation never touches stay allowed (case 4).
+- **Both halves are needed.**
+  - Without the in-flight half, case 1 records a false "step done" before the recorded-ID half catches it on the next pass.
+  - Without the recorded-ID half, cases 2 and 3 complete.
+- **Contract.** Crescendarr promises per-track isolation only for the rows it binds or creates. A future adapter must observe *all* tracks that link to those rows. A host snapshot scoped to one album would miss links from other albums, so the adapter has to query by track-file ID, not by album.
+- **Residual limit.** Association is checked only at observation time. Another track being relinked between the last observation and a host write is the same window documented in limit 2. Links from outside the snapshot's scope are invisible to the pure layer.
+
 ## Remaining limits (treat as NO-GO until each is addressed)
 
 1. **FakeHost is not Lidarr.** It is one JSON file with one atomic write per "statement", and it encodes only the native-proven ordering. Real SQLite transactions, the full host event fan-out, `DiskScanService` and the real naming and tagging pipeline are not exercised. The future host adapter must prove that "insert fresh row, `SetFileIds` and lyric row" happens in one verified host transaction, or keep these as operator actions.
@@ -253,4 +279,5 @@ The review ([comment](https://github.com/GQuX/lidarr-plugin-crescendarr/pull/37#
 7. **Path identity rules are string rules.** Hardlinks, bind mounts, server-side aliases and full Unicode case folding are not detected (finding B). The adapter must supply authoritative host identities and must not widen these rules.
 8. **The adapter must supply `Artist.Path` and `LyricFile.RelativePath` from one fresh host observation** (finding C). The pure layer cannot establish lyric identity without that trusted input.
 9. **Manifest rollback is undetectable.** If an older but internally valid manifest generation were restored (for example from a filesystem snapshot), nothing in the lab detects it. Observation-based reconciliation would then classify against the older phase, and most mismatches would surface as review, but this is unproven.
-10. **Recycle copies are never cleaned, and backups are retained indefinitely.** A retention and cleanup policy, including operator acknowledgement of review states, is future work.
+10. **Cross-album links are invisible to an album-scoped snapshot** (revision 3). The adapter must look up every track linked to each bound or fresh track-file ID.
+11. **Recycle copies are never cleaned, and backups are retained indefinitely.** A retention and cleanup policy, including operator acknowledgement of review states, is future work.

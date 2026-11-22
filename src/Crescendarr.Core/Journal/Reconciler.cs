@@ -228,6 +228,26 @@ public static class Reconciler
                 host.Tracks.Any(x => x.TrackId != track.TrackId && x.TrackFileId == track.OriginalTrackFileId))
                 blockers.Add($"track {track.TrackId}: the original track file is linked to another track");
 
+            // Per-track isolation also covers every row the operation creates or relies on: the recorded
+            // fresh ID, and while the native step is in flight any non-original row at the track's
+            // destination or original path (the candidate fresh row, or an approved rollback row).
+            // Sharing between tracks the operation never touches stays legitimate.
+            if (!host.Tracks.IsDefault && !host.TrackFiles.IsDefault)
+            {
+                var operationRows = new HashSet<int>();
+                if (progress.NewTrackFileId is { } fresh) operationRows.Add(fresh);
+                if (progress.InFlight == JournalStep.NativeUpgrade)
+                {
+                    foreach (var row in host.TrackFiles.Where(f => f.TrackFileId != track.OriginalTrackFileId &&
+                                 (string.Equals(f.Path, track.DestinationPath, StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(f.Path, track.OriginalPath, StringComparison.OrdinalIgnoreCase))))
+                        operationRows.Add(row.TrackFileId);
+                }
+
+                if (operationRows.Count > 0 && host.Tracks.Any(x => x.TrackId != track.TrackId && operationRows.Contains(x.TrackFileId)))
+                    blockers.Add($"track {track.TrackId}: a track-file row created by this operation is linked to another track");
+            }
+
             var original = Row(host, track.OriginalTrackFileId);
             if (original is not null && !PathCanonicalizer.PathsEqual(original.Path, track.OriginalPath, b.PathStyle))
                 blockers.Add($"track {track.TrackId}: original track-file ID now refers to a different path (stale or reused ID)");
