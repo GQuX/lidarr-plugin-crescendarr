@@ -76,6 +76,9 @@ namespace NzbDrone.Core.Test.MediaFiles
 
             /// <summary>A real scan runs INSIDE the importer, at track six, after the stock deletion events of tracks 1-6.</summary>
             ScanInterleavedInsideImporter,
+
+            /// <summary>Quarantined original is invisible until copied back to an unlinked final path.</summary>
+            QuarantineThenPromoteBeforeRow,
         }
 
         [TestCase(Scenario.CleanFullyLinkedBaseline)]
@@ -222,6 +225,138 @@ namespace NzbDrone.Core.Test.MediaFiles
             }
 
             AssertHeldInvariants(w, scenario);
+        }
+
+
+        // P0 issue #41: an unknown file with ALL album lyrics DB-detached. We intentionally leave
+        // physical sidecars on disk and protect a separate byte-verified copy of each one.
+        // This is NOT a safe production protocol: a process crash in the detach/relink window
+        // leaves zero registered lyrics until an explicit recovery has rebuilt associations.
+        [Test]
+        public void all_album_lyric_detach_survives_unknown_file_scan_but_needs_explicit_relink()
+        {
+            var w = BuildWorld(sixthUnlinkedFromStart: true);
+            WireRealEventsAndStockDisk(w);
+            var recorder = WireRealScan(w);
+
+            var registered = Db.All<LyricFile>();
+            Assert.That(registered.Count, Is.EqualTo(Total - 1), "the unknown sixth has no TrackFile/lyric row");
+            var lyricBackups = new Dictionary<int, string>();
+            for (var i = 1; i <= Total; i++)
+            {
+                var backup = Path.Combine(w.Backups, $"lyric-{i:D2}.lrc");
+                Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]));
+                File.Copy(w.LyricPaths[i], backup, overwrite: false);
+                Assert.That(File.ReadAllBytes(backup), Is.EqualTo(w.LyricBytes[i]), "independent lyric backup verified");
+                lyricBackups.Add(i, backup);
+            }
+
+            foreach (var lyric in registered) w.Lyrics.Delete(lyric.Id);
+            Assert.That(Db.All<LyricFile>(), Is.Empty, "all album lyric DB rows detached before stock scan");
+
+            var scan = RunRealScan(w, recorder, "whole-album-lyric-detach");
+            Assert.That(scan.Decisions.Count, Is.EqualTo(Total), "the unknown audio still causes a full tagged scan");
+            Assert.That(scan.Decisions.All(d => d.Approved), Is.True);
+            Assert.That(Db.All<LyricFile>(), Is.Empty, "no lyric rediscovery in this synthetic name layout");
+            for (var i = 1; i <= Total; i++)
+            {
+                Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]),
+                    $"the physically detached lyric {i} was unexpectedly recycled");
+                Assert.That(File.ReadAllBytes(lyricBackups[i]), Is.EqualTo(w.LyricBytes[i]),
+                    $"independent lyric backup {i} changed");
+                Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == i).TrackFileId, Is.GreaterThan(0));
+            }
+
+            // The human-approval-only style repair: insert fresh lyric rows against current
+            // host IDs. Do NOT resurrect deleted numeric lyric IDs. No production adapter here.
+            for (var i = 1; i <= Total; i++)
+            {
+                var currentTrackFileId = Db.All<Track>().Single(t => t.AbsoluteTrackNumber == i).TrackFileId;
+                w.Lyrics.Upsert(new LyricFile
+                {
+                    ArtistId = w.Artist.Id,
+                    AlbumId = w.Album.Id,
+                    TrackFileId = currentTrackFileId,
+                    RelativePath = Path.GetRelativePath(w.Artist.Path, w.LyricPaths[i]),
+                    Extension = ".lrc"
+                });
+            }
+
+            var freshLyrics = Db.All<LyricFile>();
+            Assert.That(freshLyrics.Count, Is.EqualTo(Total), "all album physical lyrics re-registered with fresh IDs");
+            Assert.That(freshLyrics.Select(l => l.Id).Intersect(registered.Select(l => l.Id)), Is.Empty,
+                "never reuse deleted lyric row IDs");
+            foreach (var i in Enumerable.Range(1, Total))
+            {
+                var t = Db.All<Track>().Single(t => t.AbsoluteTrackNumber == i);
+                var l = freshLyrics.Single(l => l.TrackFileId == t.TrackFileId);
+                Assert.That(Path.GetFullPath(Path.Combine(w.Artist.Path, l.RelativePath)),
+                    Is.EqualTo(w.LyricPaths[i]), $"relinked lyric {i} path is not host-authoritative");
+                Assert.That(File.ReadAllBytes(w.LyricPaths[i]), Is.EqualTo(w.LyricBytes[i]));
+            }
+
+            AssertHeldInvariants(w, Scenario.ControlUnlinkedValidFile);
+            Log("P0_ALBUM_LYRIC_DETACH: full rescan did not recycle any unregistered lyric; all 12 physical bytes and backups survived; operator-style fresh row reattachment verified. This DOES NOT prove crash-safe or concurrent detach.");
+        }
+
+        // P0 issue #41: scan-invisible backup/quarantine is a delay mechanism, not an atomic
+        // repair. The first scan must leave protected registered lyrics intact; after
+        // premature promotion to an unlinked visible path, the same scan must demonstrate
+        // the existing album-wide reimport/lyric-recycle hazard.
+        [Test]
+        public void quarantined_original_avoids_rescan_until_unsafe_visible_promotion()
+        {
+            var w = BuildWorld(sixthUnlinkedFromStart: false);
+            WireRealEventsAndStockDisk(w);
+            var recorder = WireRealScan(w);
+            w.TransferHook = (source, destination, mode, overwrite) =>
+            {
+                if (source == w.IncomingPaths[Sixth] && destination == w.OwnedPaths[Sixth])
+                    throw new IOException("SYNTHETIC: sixth transfer failed before placement; test quarantine");
+                return w.NativeTransfer.TransferFile(source, destination, mode, overwrite);
+            };
+
+            var result = ImportUpgrades(w);
+            Assert.That(result.Count(r => r.Result == ImportResultType.Imported), Is.EqualTo(Upgrades - 1));
+            Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Sixth).TrackFileId, Is.EqualTo(0));
+            Assert.That(File.Exists(w.OwnedPaths[Sixth]), Is.False);
+            var protectedRow = Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Total).TrackFileId;
+            Assert.That(Db.All<LyricFile>().Count, Is.EqualTo(1), "only the unselected protected lyric remains registered");
+
+            var hiddenDirectory = Path.Combine(w.Library, ".crescendarr-recovery");
+            Directory.CreateDirectory(hiddenDirectory);
+            var quarantined = Path.Combine(hiddenDirectory, "06-original.mp3");
+            File.Copy(w.BackupPaths[Sixth], quarantined, overwrite: false);
+            Assert.That(File.ReadAllBytes(quarantined), Is.EqualTo(w.OwnedBytes[Sixth]));
+            Assert.That(DiskScanService.ExcludedSubFoldersRegex.IsMatch(
+                Path.GetRelativePath(w.Artist.Path, quarantined)), Is.True,
+                "hidden quarantine must be excluded by the actual stock file-filter grammar");
+
+            // Simulates two ordinary rescans while the plugin is absent. The original is
+            // protected in a backup/hidden quarantine but is not yet a usable library file.
+            for (var scanNumber = 1; scanNumber <= 2; scanNumber++)
+            {
+                var scan = RunRealScan(w, recorder, "quarantine-safe-" + scanNumber);
+                Assert.That(scan.Decisions, Is.Empty, "quarantined audio unexpectedly reached stock import decisions");
+                Assert.That(Db.All<Track>().Single(t => t.AbsoluteTrackNumber == Total).TrackFileId,
+                    Is.EqualTo(protectedRow), "stock rescan replaced the protected superior file row");
+                Assert.That(Db.All<LyricFile>().Single().TrackFileId, Is.EqualTo(protectedRow),
+                    "protected lyric registration changed while the original was quarantined");
+                Assert.That(File.ReadAllBytes(w.LyricPaths[Total]), Is.EqualTo(w.LyricBytes[Total]));
+                Assert.That(File.ReadAllBytes(quarantined), Is.EqualTo(w.OwnedBytes[Sixth]));
+                Assert.That(File.Exists(w.OwnedPaths[Sixth]), Is.False);
+            }
+
+            Log("P0_QUARANTINE_SAFE: two real scans ignored the hidden sixth original, retained the protected FLAC row and physical lyric; track six is STILL unlinked and needs recovery.");
+
+            // Counterexample: restoring visibly before an authoritative TrackFile row/link
+            // invites stock's album-wide rescan. This is deliberately an unsafe experiment.
+            File.Move(quarantined, w.OwnedPaths[Sixth]);
+            var premature = RunRealScan(w, recorder, "quarantine-premature-promotion");
+            AssertStockFullAlbumRescanCascade(w, premature, Scenario.QuarantineThenPromoteBeforeRow);
+            AssertSixthLinkedAfterScan(w, Quality.MP3_192, w.OwnedBytes[Sixth]);
+            AssertHeldInvariants(w, Scenario.QuarantineThenPromoteBeforeRow);
+            Log("P0_QUARANTINE_UNSAFE_PROMOTION: newly visible unlinked original triggered a fresh full-album reimport and recycled the protected lyric. Quarantine alone is NOT a safe finalization protocol.");
         }
 
         /// <summary>
