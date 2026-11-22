@@ -55,6 +55,12 @@ An incremental [stock-Lidarr integration test](docs/compatibility/native-sqlite-
 
 This is **not a full Lidarr rescan or event-dispatch test**. The event handler is called directly, and a test-controlled recycler performs the physical move. Recovery under actual stock event order, startup scans and SMB remains unproven.
 
+## Real native deletion-event dispatch
+
+[PR #29](docs/compatibility/native-event-dispatch-sqlite.md) now runs the real unmodified Lidarr EventAggregator against selected real stock TrackService and LyricFileService handlers with migrated disposable SQLite and synthetic physical lyrics. Missing-file cleanup detaches the track, while a previously DB-unlinked lyric physically survives; a still-linked lyric is recycled. [Native CI 40/40, plus separate-process prepare/recovery 1/1 each](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45041825078).
+
+**Limited test scope:** the fixture explicitly wires these two subscribers and a test-controlled recycler. It is not the complete host event graph, native disk transfer, true startup rescan, or a production-safe import executor.
+
 ## What we are building
 
 A single Lidarr plugin that plans missing-track imports and strictly preferred individual upgrades without replacing entire album releases. It will preserve the monitored MusicBrainz edition, unrelated/better originals, and both existing and staged `.lrc` lyrics. It will not depend on Tubifarry, LRCGET, SABnzbd APIs, a daemon, or any other application besides compatible Lidarr. SABnzbd remains managed by Lidarr.
