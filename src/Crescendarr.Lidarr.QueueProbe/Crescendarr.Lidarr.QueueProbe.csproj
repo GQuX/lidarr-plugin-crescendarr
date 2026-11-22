@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- TEST ONLY: this project intentionally has no release/installer workflow. -->
+  <PropertyGroup>
+    <AssemblyName>Lidarr.Plugin.Crescendarr.QueueProbe</AssemblyName>
+    <RootNamespace>NzbDrone.Core</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <Target Name="RejectUnconfiguredProbe" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(CrescendarrDisposableHostBuild)' != 'true'" Text="TEST ONLY: pass -p:CrescendarrDisposableHostBuild=true on a disposable host. Never build or install on production." />
+    <Error Condition="'$(LidarrBinDir)' == ''" Text="Set -p:LidarrBinDir=/ABSOLUTE/PATH/TO/DISPOSABLE/LIDARR/BIN" />
+  </Target>
+  <ItemGroup>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.IO.Abstractions"><HintPath>$(LidarrBinDir)/System.IO.Abstractions.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
