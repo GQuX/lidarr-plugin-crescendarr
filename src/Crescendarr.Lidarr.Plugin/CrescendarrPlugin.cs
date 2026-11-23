@@ -41,6 +41,12 @@ namespace NzbDrone.Core.Plugins.Crescendarr
     /// <summary>Restart recovery: drives every Active journal through the M13 reconciler. Never trusts the Commands table.</summary>
     public sealed class CrescendarrRecoverCommand : Command
     {
+        /// <summary>
+        /// Optional explicit operator approval, "operationId:trackId:register-placed": register ONE file the native import
+        /// placed without a row (crash between move and row insert). Anything else is ignored.
+        /// </summary>
+        public string Approve { get; set; } = string.Empty;
+
         public override bool RequiresDiskAccess => true;
         public override bool SendUpdatesToClient => true;
         public override bool UpdateScheduledTask => false;
@@ -144,19 +150,59 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return path.StartsWith(prefix, StringComparison.Ordinal);
         }
 
-        /// <summary>True when the path or any existing parent up to (and including) stop is a symbolic link.</summary>
+        /// <summary>
+        /// True when the path itself is a symbolic link, INCLUDING a dangling one (M17's check used Exists, which is false
+        /// for a dangling link). Unknown I/O conditions fail closed (treated as a link).
+        /// </summary>
+        public static bool IsLink(string path)
+        {
+            try
+            {
+                return new FileInfo(path).LinkTarget != null;
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                return true;
+            }
+        }
+
+        /// <summary>True when the path or any parent up to (and including) stop is a symbolic link, dangling or not.</summary>
         public static bool HasLinkInChain(string path, string stop)
         {
             var current = Path.GetFullPath(path);
             while (!string.IsNullOrEmpty(current))
             {
-                FileSystemInfo info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
-                if (info.Exists && info.LinkTarget != null) return true;
+                if (IsLink(current)) return true;
                 if (current == stop || current == "/") break;
                 current = Path.GetDirectoryName(current);
             }
 
             return false;
+        }
+
+        /// <summary>Something (file, directory or link, even a dangling one) already occupies the path.</summary>
+        public static bool Occupied(string path) => File.Exists(path) || Directory.Exists(path) || IsLink(path);
+
+        /// <summary>A real regular file: present, not a link, and no link anywhere in its chain up to root.</summary>
+        public static bool IsRegularFile(string root, string path) => File.Exists(path) && !HasLinkInChain(path, root);
+
+        /// <summary>Canonical confinement required before every destructive operation: under root and no link in the chain.</summary>
+        public static string RequireConfined(string root, string path, string role)
+        {
+            var full = Path.GetFullPath(path);
+            if (!string.Equals(full, path.TrimEnd('/'), StringComparison.Ordinal) && !string.Equals(full, path, StringComparison.Ordinal))
+                throw new CrescendarrGuardException($"{role} is not a canonical path.");
+            if (!IsUnder(root, full)) throw new CrescendarrGuardException($"{role} escapes the disposable root.");
+            if (HasLinkInChain(full, root)) throw new CrescendarrGuardException($"{role} traverses a symbolic link.");
+            return full;
         }
 
         public static string Sha(string path) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
@@ -166,6 +212,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// <summary>Write via temp file + fsync + rename; replaces an existing file only when allowed.</summary>
         public static void WriteDurable(string path, byte[] bytes, bool replace)
         {
+            if (!replace && IsLink(path)) throw new CrescendarrGuardException($"Refusing to write over a link: {path}");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             var temporary = path + ".partial-" + Guid.NewGuid().ToString("N");
             using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))

@@ -48,6 +48,14 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
         public const string ReleaseMbid = "9fd3c58e-91db-4d89-86a7-e57558394c1f";
         public const string AltReleaseMbid = "3a0b7c55-1f62-4f0e-9a64-7d2f0e3b51aa";
 
+        // M18: an unrelated FOREIGN artist/album used to prove the global TrackFile sharer projection.
+        public const string ForeignArtistName = "Crescendarr Foreign Artist";
+        public const string ForeignAlbumTitle = "Crescendarr Foreign Album";
+        public const string ForeignArtistMbid = "6f1c0d3e-2b4a-4c5d-9e8f-0a1b2c3d4e5f";
+        public const string ForeignReleaseGroupMbid = "7a2d1e4f-3c5b-4d6e-8f9a-1b2c3d4e5f60";
+        public const string ForeignReleaseMbid = "8b3e2f50-4d6c-4e7f-9a0b-2c3d4e5f6071";
+        public const int DanglingTrackFileId = 900001;
+
         private readonly IRootFolderService _rootFolders;
         private readonly IQualityProfileService _qualityProfiles;
         private readonly IMetadataProfileService _metadataProfiles;
@@ -224,15 +232,95 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             Download("Crescendarr Synthetic Album [good]", ReleaseMbid, 2);
             Download("Crescendarr Synthetic Album [wrong edition]", AltReleaseMbid, 3);
 
+            var foreign = message.Scenario == "three" ? SeedForeign(rootFolder, profile, metadataProfile) : null;
             var seed = new
             {
                 scenario = message.Scenario, artistId = artist.Id, artistPath = artist.Path, albumId = album.Id,
-                releaseId = release.Id, alternateReleaseId = alternate.Id, qualityProfileId = profile.Id, tracks = evidence
+                releaseId = release.Id, alternateReleaseId = alternate.Id, qualityProfileId = profile.Id, tracks = evidence, foreign
             };
             File.WriteAllText(Path.Combine(root, "seed.json"), JsonSerializer.Serialize(seed, new JsonSerializerOptions { WriteIndented = true }));
             var line = $"CRESCENDARR_SEEDED scenario={message.Scenario} artist={artist.Id} album={album.Id} release={release.Id} alternate={alternate.Id} owned={evidence.Count}";
             Console.WriteLine(line);
             _logger.Info(line);
+        }
+
+        /// <summary>
+        /// Unrelated foreign album (separate artist and folder): F1 and F2 legitimately share ONE TrackFile row,
+        /// F3 is unlinked (TrackFileId=0) and F4 carries a dangling nonzero TrackFileId. None of it may block or be touched.
+        /// </summary>
+        private object SeedForeign(RootFolder rootFolder, QualityProfile profile, MetadataProfile metadataProfile)
+        {
+            var metadata = _artistMetadata.Insert(new ArtistMetadata
+            {
+                ForeignArtistId = ForeignArtistMbid, OldForeignArtistIds = new List<string>(), Name = ForeignArtistName,
+                Aliases = new List<string>(), Overview = string.Empty, Disambiguation = string.Empty, Type = "Group",
+                Status = ArtistStatusType.Continuing, Images = new List<MediaCover.MediaCover>(), Links = new List<Links>(),
+                Genres = new List<string>(), Ratings = new Ratings(), Members = new List<Member>()
+            });
+            var artist = new Artist
+            {
+                ArtistMetadataId = metadata.Id, CleanName = "crescendarrforeignartist", SortName = ForeignArtistName.ToLowerInvariant(),
+                Monitored = true, MonitorNewItems = NewItemMonitorTypes.None, LastInfoSync = DateTime.UtcNow,
+                RootFolderPath = rootFolder.Path, Added = DateTime.UtcNow, QualityProfileId = profile.Id,
+                MetadataProfileId = metadataProfile.Id, Tags = new HashSet<int>(), Metadata = metadata, QualityProfile = profile
+            };
+            artist.Path = Path.Combine(rootFolder.Path, _fileNames.GetArtistFolder(artist));
+            artist = _artists.Insert(artist);
+            Directory.CreateDirectory(artist.Path);
+            var album = _albums.Insert(new Album
+            {
+                ArtistMetadataId = metadata.Id, ForeignAlbumId = ForeignReleaseGroupMbid, OldForeignAlbumIds = new List<string>(),
+                Title = ForeignAlbumTitle, Overview = string.Empty, Disambiguation = string.Empty, ReleaseDate = new DateTime(2019, 1, 1),
+                Images = new List<MediaCover.MediaCover>(), Links = new List<Links>(), Genres = new List<string>(),
+                AlbumType = "Album", SecondaryTypes = new List<SecondaryAlbumType>(), Ratings = new Ratings(),
+                CleanTitle = "crescendarrforeignalbum", Monitored = true, AnyReleaseOk = false,
+                LastInfoSync = DateTime.UtcNow, Added = DateTime.UtcNow
+            });
+            SilentMp3(192, 30, out var duration);
+            var release = _releases.Insert(new AlbumRelease
+            {
+                AlbumId = album.Id, ForeignReleaseId = ForeignReleaseMbid, OldForeignReleaseIds = new List<string>(), Title = ForeignAlbumTitle,
+                Status = "Official", Duration = duration * 4, Label = new List<string>(), Disambiguation = string.Empty, Country = new List<string>(),
+                ReleaseDate = new DateTime(2019, 1, 1), Media = new List<Medium> { new Medium { Number = 1, Name = string.Empty, Format = "Digital Media" } },
+                TrackCount = 4, Monitored = true
+            });
+            _tracks.InsertMany(Enumerable.Range(1, 4).Select(i => new Track
+            {
+                ForeignTrackId = Uuid(5, i), OldForeignTrackIds = new List<string>(), ForeignRecordingId = Uuid(4, i),
+                OldForeignRecordingIds = new List<string>(), AlbumReleaseId = release.Id, ArtistMetadataId = metadata.Id,
+                TrackNumber = i.ToString(), AbsoluteTrackNumber = i, Title = $"Foreign Track {i}", Duration = duration,
+                Explicit = false, Ratings = new Ratings(), MediumNumber = 1, TrackFileId = 0
+            }).ToList());
+            var tracks = _tracks.GetTracksByRelease(release.Id).OrderBy(t => t.AbsoluteTrackNumber).ToList();
+
+            var path = Path.Combine(artist.Path, "01 - Foreign Medley.mp3");
+            File.WriteAllBytes(path, SilentMp3(192, 30, out _));
+            new AudioTag
+            {
+                Title = "Foreign Medley", Performers = new[] { ForeignArtistName }, AlbumArtists = new[] { ForeignArtistName },
+                Album = ForeignAlbumTitle, Track = 1, Disc = 1, DiscCount = 1, Year = 2019,
+                MusicBrainzReleaseId = ForeignReleaseMbid, MusicBrainzReleaseGroupId = ForeignReleaseGroupMbid,
+                MusicBrainzArtistId = ForeignArtistMbid, MusicBrainzReleaseArtistId = ForeignArtistMbid,
+                MusicBrainzTrackId = Uuid(4, 1), MusicBrainzReleaseTrackId = Uuid(5, 1)
+            }.Write(path);
+            var tag = new AudioTag(path);
+            var info = new FileInfo(path);
+            var shared = new TrackFile
+            {
+                Path = path, AlbumId = album.Id, Size = info.Length, Modified = info.LastWriteTimeUtc, DateAdded = DateTime.UtcNow,
+                Quality = new QualityModel(Quality.MP3_192), MediaInfo = tag.MediaInfo
+            };
+            _mediaFiles.Add(shared);
+            tracks[0].TrackFileId = shared.Id;
+            tracks[1].TrackFileId = shared.Id;
+            tracks[3].TrackFileId = DanglingTrackFileId;
+            _tracks.SetFileId(new List<Track> { tracks[0], tracks[1], tracks[3] });
+            return new
+            {
+                artistId = artist.Id, artistPath = artist.Path, albumId = album.Id, releaseId = release.Id, sharedTrackFileId = shared.Id,
+                sharedPath = path, sharedSha = Sha(path), danglingTrackFileId = DanglingTrackFileId,
+                tracks = tracks.Select(t => new { n = t.AbsoluteTrackNumber, trackId = t.Id, trackFileId = t.TrackFileId }).ToList()
+            };
         }
 
         private static string RequireRoot()

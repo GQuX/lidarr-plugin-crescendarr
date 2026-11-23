@@ -54,15 +54,19 @@ public static class JournalValidation
         if (!IsCanonical(binding.ArtistRoot, style)) errors.Add("ArtistRoot is not a canonical absolute path.");
         else if (binding.LibraryRoot is null || !PathCanonicalizer.IsStrictlyUnder(binding.ArtistRoot, binding.LibraryRoot, style)) errors.Add("ArtistRoot must be strictly under LibraryRoot.");
 
-        if (binding.Tracks.IsDefaultOrEmpty) errors.Add("At least one track is required.");
-        else if (binding.Tracks.Length > MaxTracks) errors.Add($"At most {MaxTracks} tracks per operation.");
+        var tracks = binding.Tracks.IsDefault ? ImmutableArray<TrackBinding>.Empty : binding.Tracks;
+        var additions = binding.Additions.IsDefault ? ImmutableArray<AdditionBinding>.Empty : binding.Additions;
+        var kept = binding.Kept.IsDefault ? ImmutableArray<KeptTrackBinding>.Empty : binding.Kept;
+        var albumLyrics = binding.AlbumLyrics.IsDefault ? ImmutableArray<AlbumLyricBinding>.Empty : binding.AlbumLyrics;
+        if (tracks.IsEmpty && additions.IsEmpty) errors.Add("At least one track is required (a replacement or an addition).");
+        else if (tracks.Length + additions.Length + kept.Length > MaxTracks) errors.Add($"At most {MaxTracks} tracks per operation.");
         else
         {
-            if (binding.Tracks.Select(t => t.TrackId).Distinct().Count() != binding.Tracks.Length) errors.Add("Duplicate track IDs.");
-            if (binding.Tracks.Select(t => t.OriginalTrackFileId).Distinct().Count() != binding.Tracks.Length) errors.Add("Duplicate original track-file IDs (multi-track files are not supported).");
+            if (tracks.Select(t => t.TrackId).Distinct().Count() != tracks.Length) errors.Add("Duplicate track IDs.");
+            if (tracks.Select(t => t.OriginalTrackFileId).Distinct().Count() != tracks.Length) errors.Add("Duplicate original track-file IDs (multi-track files are not supported).");
 
             var allPaths = new List<string>();
-            foreach (var track in binding.Tracks)
+            foreach (var track in tracks)
             {
                 if (track is null) { errors.Add("Null track binding."); continue; }
                 var label = $"Track {track.TrackId}";
@@ -95,6 +99,69 @@ public static class JournalValidation
                     allPaths.AddRange(new[] { lyric.Path, lyric.BackupPath });
                 }
             }
+
+            // M18: additions, protected (kept) tracks and album-wide lyrics share the same operation and path rules.
+            foreach (var a in additions)
+            {
+                if (a is null) { errors.Add("Null addition binding."); continue; }
+                var label = $"Addition {a.TrackId}";
+                if (a.TrackId <= 0) errors.Add($"{label}: TrackId must be positive.");
+                if (!IsUuid(a.RecordingMbid)) errors.Add($"{label}: RecordingMbid must be a lowercase canonical UUID.");
+                RequireUnder(errors, label, "DestinationPath", a.DestinationPath, binding.ArtistRoot, style);
+                RequireUnder(errors, label, "IncomingPath", a.IncomingPath, binding.StagingRoot, style);
+                RequireContent(errors, label, "Incoming", a.Incoming);
+                allPaths.AddRange(new[] { a.DestinationPath, a.IncomingPath });
+            }
+
+            foreach (var k in kept)
+            {
+                if (k is null) { errors.Add("Null kept-track binding."); continue; }
+                var label = $"Kept track {k.TrackId}";
+                if (k.TrackId <= 0) errors.Add($"{label}: TrackId must be positive.");
+                if (k.TrackFileId <= 0) errors.Add($"{label}: TrackFileId must be positive.");
+                if (!IsUuid(k.RecordingMbid)) errors.Add($"{label}: RecordingMbid must be a lowercase canonical UUID.");
+                RequireUnder(errors, label, "Path", k.Path, binding.ArtistRoot, style);
+                RequireContent(errors, label, "Content", k.Content);
+                allPaths.Add(k.Path);
+            }
+
+            var trackIds = tracks.Where(t => t is not null).Select(t => t.TrackId)
+                .Concat(additions.Where(a => a is not null).Select(a => a.TrackId))
+                .Concat(kept.Where(k => k is not null).Select(k => k.TrackId)).ToList();
+            if (trackIds.Distinct().Count() != trackIds.Count) errors.Add("A track is bound in more than one role (replacement, addition, kept).");
+            var fileIds = tracks.Where(t => t is not null).Select(t => t.OriginalTrackFileId).Concat(kept.Where(k => k is not null).Select(k => k.TrackFileId)).ToList();
+            if (fileIds.Distinct().Count() != fileIds.Count) errors.Add("Duplicate original or kept track-file IDs.");
+
+            foreach (var l in albumLyrics)
+            {
+                if (l is null) { errors.Add("Null album lyric binding."); continue; }
+                var label = $"Album lyric {l.LyricFileId}";
+                if (l.LyricFileId <= 0) errors.Add($"{label}: LyricFileId must be positive.");
+                var owner = tracks.FirstOrDefault(t => t?.TrackId == l.TrackId);
+                if (owner is null && !kept.Any(k => k?.TrackId == l.TrackId)) errors.Add($"{label}: its track must be a bound replacement or kept track.");
+                if (!IsSafeRelative(l.RelativePath, style)) errors.Add($"{label}: relative path is not a safe relative path.");
+                RequireUnder(errors, label, "Path", l.Path, binding.ArtistRoot, style);
+                if (IsSafeRelative(l.RelativePath, style) && binding.ArtistRoot is not null &&
+                    !string.Equals(JoinUnder(binding.ArtistRoot, l.RelativePath, style), l.Path, StringComparison.Ordinal))
+                    errors.Add($"{label}: Path is not ArtistRoot joined with the registered relative path.");
+                RequireUnder(errors, label, "BackupPath", l.BackupPath, binding.OperationRoot, style);
+                RequireContent(errors, label, "Content", l.Content);
+                if (owner?.Lyric is { } bound && bound.LyricFileId == l.LyricFileId)
+                {
+                    // The same physical lyric seen twice: it must be the same file and bytes, and is not a second path.
+                    if (bound.Path != l.Path || bound.RelativePath != l.RelativePath || bound.Content != l.Content)
+                        errors.Add($"{label}: disagrees with the replacement's bound lyric.");
+                    allPaths.Add(l.BackupPath);
+                }
+                else
+                {
+                    if (owner?.Lyric is not null) errors.Add($"{label}: a replacement may own only its bound lyric.");
+                    allPaths.AddRange(new[] { l.Path, l.BackupPath });
+                }
+            }
+
+            if (albumLyrics.Where(l => l is not null).Select(l => l.LyricFileId).Distinct().Count() != albumLyrics.Count(l => l is not null))
+                errors.Add("Duplicate album lyric IDs.");
 
             var nonNull = allPaths.Where(p => p is not null).ToList();
             // Distinct roles must never alias one another, compared case-insensitively on every

@@ -100,7 +100,20 @@ public static class JournalCodec
             if (p.Phase > TrackPhase.BackupVerified && m.Progress.Any(o => o.Phase < TrackPhase.BackupVerified)) return "destructive phase before every backup was verified";
         }
 
-        if (m.Progress.Count(p => p.InFlight is not null) > 1) return "more than one step in flight";
+        var additions = m.Additions.IsDefault ? ImmutableArray<AdditionProgress>.Empty : m.Additions;
+        if (additions.Length != m.Binding.Additions.Length) return "addition progress does not cover every bound addition";
+        for (var i = 0; i < additions.Length; i++)
+        {
+            var a = additions[i];
+            if (a.TrackId != m.Binding.Additions[i].TrackId) return "addition progress order differs from binding order";
+            if (a.InterruptedAttempts < 0) return "negative attempt count";
+            if ((a.Phase == AdditionPhase.Added) != (a.NewTrackFileId is not null)) return "addition track-file ID inconsistent with phase";
+            if (a.Phase == AdditionPhase.Added && a.InFlight) return "added addition still in flight";
+            if ((a.Phase == AdditionPhase.Added || a.InFlight) && !JournalEngine.AllUpgradesFinal(m)) return "addition before every replacement was final";
+        }
+
+        if (m.Progress.Count(p => p.InFlight is not null) + additions.Count(a => a.InFlight) > 1) return "more than one step in flight";
+        if (m.Status == OperationStatus.Completed && additions.Any(a => a.Phase != AdditionPhase.Added)) return "completed operation with unfinished additions";
         if (m.InFlightTrack is { } busy)
         {
             if (m.Status != OperationStatus.Active && m.Status != OperationStatus.RequiresReview) return "step in flight on a completed operation";
@@ -150,6 +163,19 @@ public static class JournalCodec
             w.WriteNumber("interruptedAttempts", p.InterruptedAttempts);
             NullableInt(w, "newTrackFileId", p.NewTrackFileId);
             NullableInt(w, "newLyricFileId", p.NewLyricFileId);
+            w.WriteEndObject();
+        }
+
+        w.WriteEndArray();
+        w.WriteStartArray("additions");
+        foreach (var a in m.Additions)
+        {
+            w.WriteStartObject();
+            w.WriteNumber("trackId", a.TrackId);
+            w.WriteString("phase", a.Phase.ToString());
+            w.WriteBoolean("inFlight", a.InFlight);
+            w.WriteNumber("interruptedAttempts", a.InterruptedAttempts);
+            NullableInt(w, "newTrackFileId", a.NewTrackFileId);
             w.WriteEndObject();
         }
 
@@ -215,6 +241,46 @@ public static class JournalCodec
         }
 
         w.WriteEndArray();
+        w.WriteStartArray("additions");
+        foreach (var a in b.Additions)
+        {
+            w.WriteStartObject();
+            w.WriteNumber("trackId", a.TrackId);
+            w.WriteString("recordingMbid", a.RecordingMbid);
+            w.WriteString("destinationPath", a.DestinationPath);
+            w.WriteString("incomingPath", a.IncomingPath);
+            WriteContent(w, "incoming", a.Incoming);
+            w.WriteEndObject();
+        }
+
+        w.WriteEndArray();
+        w.WriteStartArray("kept");
+        foreach (var k in b.Kept)
+        {
+            w.WriteStartObject();
+            w.WriteNumber("trackId", k.TrackId);
+            w.WriteString("recordingMbid", k.RecordingMbid);
+            w.WriteNumber("trackFileId", k.TrackFileId);
+            w.WriteString("path", k.Path);
+            WriteContent(w, "content", k.Content);
+            w.WriteEndObject();
+        }
+
+        w.WriteEndArray();
+        w.WriteStartArray("albumLyrics");
+        foreach (var l in b.AlbumLyrics)
+        {
+            w.WriteStartObject();
+            w.WriteNumber("lyricFileId", l.LyricFileId);
+            w.WriteNumber("trackId", l.TrackId);
+            w.WriteString("relativePath", l.RelativePath);
+            w.WriteString("path", l.Path);
+            WriteContent(w, "content", l.Content);
+            w.WriteString("backupPath", l.BackupPath);
+            w.WriteEndObject();
+        }
+
+        w.WriteEndArray();
         w.WriteEndObject();
     }
 
@@ -240,7 +306,7 @@ public static class JournalCodec
 
     private static OperationManifest ReadPayload(JsonElement e)
     {
-        Exact(e, "generation", "status", "reviewReasons", "bindingDigest", "binding", "progress");
+        Exact(e, "generation", "status", "reviewReasons", "bindingDigest", "binding", "progress", "additions");
         var reasons = Array(e, "reviewReasons").Select(r => r.ValueKind == JsonValueKind.String ? r.GetString()! : throw new FormatException("reason")).ToImmutableArray();
         var progress = Array(e, "progress").Select(p =>
         {
@@ -255,18 +321,29 @@ public static class JournalCodec
                 NullableInt(p, "newLyricFileId"));
         }).ToImmutableArray();
 
+        var additions = Array(e, "additions").Select(a =>
+        {
+            Exact(a, "trackId", "phase", "inFlight", "interruptedAttempts", "newTrackFileId");
+            var flight = a.GetProperty("inFlight");
+            if (flight.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new FormatException("expected boolean");
+            return new AdditionProgress(Int(a, "trackId"), ParseEnum<AdditionPhase>(Str(a, "phase")), flight.GetBoolean(), Int(a, "interruptedAttempts"), NullableInt(a, "newTrackFileId"));
+        }).ToImmutableArray();
+
         return new OperationManifest(
             Long(e, "generation"),
             ParseEnum<OperationStatus>(Str(e, "status")),
             reasons,
             ReadBinding(e.GetProperty("binding")),
             Str(e, "bindingDigest"),
-            progress);
+            progress)
+        {
+            Additions = additions,
+        };
     }
 
     private static OperationBinding ReadBinding(JsonElement e)
     {
-        Exact(e, "operationId", "download", "albumId", "releaseGroupMbid", "monitoredReleaseId", "monitoredReleaseMbid", "pathStyle", "libraryRoot", "stagingRoot", "operationRoot", "artistRoot", "tracks");
+        Exact(e, "operationId", "download", "albumId", "releaseGroupMbid", "monitoredReleaseId", "monitoredReleaseMbid", "pathStyle", "libraryRoot", "stagingRoot", "operationRoot", "artistRoot", "tracks", "additions", "kept", "albumLyrics");
         DownloadBinding? download = null;
         var d = e.GetProperty("download");
         if (d.ValueKind != JsonValueKind.Null)
@@ -290,8 +367,29 @@ public static class JournalCodec
                 Str(t, "incomingPath"), Content(t.GetProperty("original")), Content(t.GetProperty("incoming")), Str(t, "backupAudioPath"), lyric);
         }).ToImmutableArray();
 
+        var additions = Array(e, "additions").Select(a =>
+        {
+            Exact(a, "trackId", "recordingMbid", "destinationPath", "incomingPath", "incoming");
+            return new AdditionBinding(Int(a, "trackId"), Str(a, "recordingMbid"), Str(a, "destinationPath"), Str(a, "incomingPath"), Content(a.GetProperty("incoming")));
+        }).ToImmutableArray();
+        var kept = Array(e, "kept").Select(k =>
+        {
+            Exact(k, "trackId", "recordingMbid", "trackFileId", "path", "content");
+            return new KeptTrackBinding(Int(k, "trackId"), Str(k, "recordingMbid"), Int(k, "trackFileId"), Str(k, "path"), Content(k.GetProperty("content")));
+        }).ToImmutableArray();
+        var albumLyrics = Array(e, "albumLyrics").Select(l =>
+        {
+            Exact(l, "lyricFileId", "trackId", "relativePath", "path", "content", "backupPath");
+            return new AlbumLyricBinding(Int(l, "lyricFileId"), Int(l, "trackId"), Str(l, "relativePath"), Str(l, "path"), Content(l.GetProperty("content")), Str(l, "backupPath"));
+        }).ToImmutableArray();
+
         return new OperationBinding(Str(e, "operationId"), download, Int(e, "albumId"), Str(e, "releaseGroupMbid"), Int(e, "monitoredReleaseId"),
-            Str(e, "monitoredReleaseMbid"), ParseEnum<PathStyle>(Str(e, "pathStyle")), Str(e, "libraryRoot"), Str(e, "stagingRoot"), Str(e, "operationRoot"), tracks, Str(e, "artistRoot"));
+            Str(e, "monitoredReleaseMbid"), ParseEnum<PathStyle>(Str(e, "pathStyle")), Str(e, "libraryRoot"), Str(e, "stagingRoot"), Str(e, "operationRoot"), tracks, Str(e, "artistRoot"))
+        {
+            Additions = additions,
+            Kept = kept,
+            AlbumLyrics = albumLyrics,
+        };
     }
 
     private static ContentId Content(JsonElement e)

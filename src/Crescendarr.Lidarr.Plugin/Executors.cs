@@ -1,5 +1,7 @@
 // Plan (read-only), Import (the only writer) and Recover. Each runs inside ONE stock RequiresDiskAccess command.
-// The M13 Reconciler decides every journaled step, both on the first run and after a restart.
+// M18 (issue #48): ONE durable whole-operation journal (M13 format v3) covers album-wide lyric backups, every
+// replacement, every missing-track addition, protected unselected tracks and the final album-wide lyric state.
+// The M13 Reconciler decides every step, on the first run and after a restart; nothing is inferred from absence.
 using System.Collections.Immutable;
 using System.Text.Json;
 using Crescendarr.Core.Domain;
@@ -38,13 +40,14 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         {
             var root = CrescendarrGuard.RequireRoot();
             CrescendarrGuard.RequireHostConfined(root, _rootFolders, _config);
+            var plans = Disk.RequireConfined(root, Path.Combine(root, "crescendarr", "plans"), "plan folder");
             var items = _adapter.CompletedItems(root, out var notes);
             CrescendarrGuard.Emit(_logger, $"OBSERVED clientItems=[{string.Join(",", notes)}] completed={items.Count}");
             foreach (var (item, clientId, watch) in items)
             {
                 var observation = _adapter.Observe(item, clientId, watch);
                 var line = _adapter.Describe(observation);
-                Disk.WriteDurable(Path.Combine(root, "crescendarr", "plans", Disk.Sha(System.Text.Encoding.UTF8.GetBytes(item.DownloadId))[..16] + ".txt"), line + "\n", replace: true);
+                Disk.WriteDurable(Path.Combine(plans, Disk.Sha(System.Text.Encoding.UTF8.GetBytes(item.DownloadId))[..16] + ".txt"), line + "\n", replace: true);
                 CrescendarrGuard.Emit(_logger, "PLAN " + line);
             }
         }
@@ -54,17 +57,26 @@ namespace NzbDrone.Core.Plugins.Crescendarr
     internal sealed class OperationContext
     {
         public string Root;
+        public string OperationId;
         public string OperationRoot;
         public Artist Artist;
         public Album Album;
         public string ArtistMbid;
         public string Staging;
+        public string Approve;
+        public OperationManifest Manifest;
+        public NextAction Proposal;
         public Func<bool> LoadStagedDecisions;
         public Dictionary<int, ImportDecision<LocalTrack>> StagedDecisionByTrack = new Dictionary<int, ImportDecision<LocalTrack>>();
     }
 
     public sealed class CrescendarrImportExecutor : IExecute<CrescendarrImportCommand>, IExecute<CrescendarrRecoverCommand>
     {
+        private const string Completed = "Completed";
+        private const string RequiresReview = "RequiresReview";
+        private const string OperatorApprovalRequired = "OperatorApprovalRequired";
+        private const string Abandoned = "Abandoned";
+
         private readonly HostAdapter _adapter;
         private readonly IRootFolderService _rootFolders;
         private readonly IConfigService _config;
@@ -132,19 +144,35 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
             var operationId = OperationId(plan.PlanId);
             var opRoot = Path.Combine(root, "crescendarr", "ops", operationId);
-            if (Directory.Exists(opRoot))
+            var staging = Path.Combine(root, "crescendarr", "staging", operationId);
+
+            // M18 P1: an album with an unfinished (RequiresReview or operator-blocked) operation is never auto-resumed
+            // and never gets a second, overlapping operation.
+            var blocking = UnfinishedOperations(root, observed.Album.Id);
+            if (blocking.Count > 0)
+            {
+                Refuse(message, $"album has an unfinished operation [{string.Join(",", blocking)}]; it is not auto-resumed and blocks new imports until an operator resolves it", observed);
+                return;
+            }
+
+            if (Disk.Occupied(opRoot) || Disk.Occupied(staging))
             {
                 Refuse(message, "operation already exists; only the recovery command may continue it", observed);
                 return;
             }
 
+            // M18 P1: canonical confinement and link checks (dangling links included) for EVERY path, before any write.
+            var unsafePath = PathSafety(root, observed, opRoot, staging);
+            if (unsafePath != null)
+            {
+                Refuse(message, "path safety: " + unsafePath, observed);
+                return;
+            }
+
             // 1. Operation-owned staged copies of every candidate (the completed download itself is never touched).
-            var staging = Path.Combine(root, "crescendarr", "staging", operationId);
             foreach (var (key, sha) in observed.IncomingSha)
             {
-                var source = observed.ByCandidate[key].Item.Path;
-                if (Disk.HasLinkInChain(source, root)) throw new CommandFailedException("Candidate traverses a link.");
-                Disk.CopyVerified(source, Path.Combine(staging, key), sha);
+                Disk.CopyVerified(observed.ByCandidate[key].Item.Path, Path.Combine(staging, key), sha);
             }
 
             // 2. Identical stock decisions on identical bytes, now pointing at the staged copies.
@@ -160,36 +188,33 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 .Check(staged.Album.Id, staged.Album.ForeignAlbumId, staged.MonitoredRelease.ForeignReleaseId, selectedStock);
             if (!preflight.EditionMatches) throw new CommandFailedException("Edition preflight refused: " + preflight.Reason);
 
-            var context = new OperationContext { Root = root, OperationRoot = opRoot, Artist = staged.Artist, Album = staged.Album,
-                ArtistMbid = staged.Artist.Metadata.Value.ForeignArtistId, Staging = staging };
-            var upgrades = new List<TrackBinding>();
-            var additions = new List<(global::Crescendarr.Core.Domain.TrackDecision Plan, ImportDecision<LocalTrack> Stock, string Destination)>();
+            var context = new OperationContext
+            {
+                Root = root, OperationId = operationId, OperationRoot = opRoot, Artist = staged.Artist, Album = staged.Album,
+                ArtistMbid = staged.Artist.Metadata.Value.ForeignArtistId, Staging = staging
+            };
             var artistRoot = staged.Artist.Path.TrimEnd('/');
+            var upgrades = new List<TrackBinding>();
+            var additions = new List<AdditionBinding>();
             foreach (var decision in selected)
             {
                 var stock = staged.ByCandidate[decision.CandidateKey];
                 var track = stock.Item.Tracks.Single();
-                var destination = _fileNames.BuildTrackFilePath(stock.Item.Tracks, staged.Artist, staged.Album,
-                    new TrackFile { Path = stock.Item.Path, SceneName = stock.Item.SceneName }, Path.GetExtension(stock.Item.Path));
-                if (!Disk.IsUnder(artistRoot, destination) || Disk.HasLinkInChain(Path.GetDirectoryName(destination), root))
-                    throw new CommandFailedException("Destination escapes the artist root or traverses a link.");
+                var destination = Destination(stock, staged.Artist, staged.Album);
                 context.StagedDecisionByTrack[track.Id] = stock;
                 if (decision.Action == MergeAction.AddMissing)
                 {
-                    if (File.Exists(destination)) throw new CommandFailedException("Add-missing destination already exists: refusing to overwrite.");
-                    additions.Add((decision, stock, destination));
+                    additions.Add(new AdditionBinding(track.Id, track.ForeignRecordingId, destination, stock.Item.Path, Content(stock.Item.Path)));
                     continue;
                 }
 
                 var original = staged.TrackFiles[track.TrackFileId];
-                if (Disk.HasLinkInChain(original.Path, root)) throw new CommandFailedException("Original traverses a link.");
                 var lyricRows = staged.AlbumLyrics.Where(l => l.TrackFileId == original.Id).ToList();
                 if (lyricRows.Count > 1) throw new CommandFailedException("More than one lyric row is linked to an upgraded track file.");
                 LyricBinding lyric = null;
                 if (lyricRows.Count == 1)
                 {
                     var lyricPath = Path.Combine(artistRoot, lyricRows[0].RelativePath);
-                    if (!File.Exists(lyricPath) || Disk.HasLinkInChain(lyricPath, root)) throw new CommandFailedException("Registered lyric is missing or traverses a link.");
                     lyric = new LyricBinding(lyricRows[0].Id, lyricRows[0].RelativePath, lyricPath, Content(lyricPath),
                         Path.Combine(opRoot, "track-lyrics", track.Id + ".lrc"));
                 }
@@ -198,46 +223,67 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     Content(original.Path), Content(stock.Item.Path), Path.Combine(opRoot, "audio", track.Id + Path.GetExtension(original.Path)), lyric));
             }
 
-            // 4. Album-wide lyric backups BEFORE any destructive step, including unselected (superior) tracks.
-            var albumLyrics = new List<object>();
-            foreach (var lyric in staged.AlbumLyrics.OrderBy(l => l.Id))
+            // Every other owned album track is PROTECTED: its bytes and its link to a row at its path must survive.
+            var upgraded = upgrades.Select(u => u.TrackId).ToHashSet();
+            var kept = new List<KeptTrackBinding>();
+            foreach (var track in staged.AlbumTracks.Where(t => t.TrackFileId > 0 && !upgraded.Contains(t.Id)).OrderBy(t => t.Id))
             {
-                var path = Path.Combine(artistRoot, lyric.RelativePath);
-                if (!File.Exists(path) || Disk.HasLinkInChain(path, root)) throw new CommandFailedException("An album lyric is missing or traverses a link.");
-                var sha = Disk.Sha(path);
-                var backup = Path.Combine(opRoot, "album-lyrics", lyric.Id + ".lrc");
-                Disk.CopyVerified(path, backup, sha);
-                var trackId = staged.AlbumTracks.FirstOrDefault(t => t.TrackFileId == lyric.TrackFileId)?.Id ?? 0;
-                albumLyrics.Add(new { lyric.Id, lyric.TrackFileId, trackId, lyric.RelativePath, sha, backup });
+                if (!staged.TrackFiles.TryGetValue(track.TrackFileId, out var file)) throw new CommandFailedException($"Kept track {track.Id} has no readable track-file row.");
+                kept.Add(new KeptTrackBinding(track.Id, track.ForeignRecordingId, file.Id, file.Path, Content(file.Path)));
             }
 
-            Disk.WriteDurable(Path.Combine(opRoot, "album-lyrics.json"), JsonSerializer.Serialize(albumLyrics), replace: false);
+            // 4. Album-wide lyric backups BEFORE any destructive step, including unselected (superior) tracks.
+            var albumLyrics = new List<AlbumLyricBinding>();
+            var albumLyricEvidence = new List<object>();
+            foreach (var row in staged.AlbumLyrics.OrderBy(l => l.Id))
+            {
+                var path = Path.Combine(artistRoot, row.RelativePath);
+                var owner = staged.AlbumTracks.FirstOrDefault(t => t.TrackFileId == (row.TrackFileId ?? 0) && t.TrackFileId > 0);
+                if (owner == null) throw new CommandFailedException($"Album lyric {row.RelativePath} is not linked to a monitored-release track.");
+                var sha = Disk.Sha(path);
+                var backup = Path.Combine(opRoot, "album-lyrics", row.Id + ".lrc");
+                Disk.CopyVerified(path, backup, sha);
+                albumLyrics.Add(new AlbumLyricBinding(row.Id, owner.Id, row.RelativePath, path, new ContentId(sha, new FileInfo(path).Length), backup));
+                albumLyricEvidence.Add(new { row.Id, row.TrackFileId, trackId = owner.Id, row.RelativePath, sha, backup });
+            }
+
+            Disk.WriteDurable(Path.Combine(opRoot, "album-lyrics.json"), JsonSerializer.Serialize(albumLyricEvidence), replace: false);
             Disk.WriteDurable(Path.Combine(opRoot, "operation.json"), JsonSerializer.Serialize(new
             {
                 operationId, planId = plan.PlanId, downloadId = item.DownloadId, clientId, staging, downloadFolder = observed.Folder,
                 candidates = observed.IncomingSha,
                 artistId = staged.Artist.Id, albumId = staged.Album.Id, artistMbid = staged.Artist.Metadata.Value.ForeignArtistId,
-                additions = additions.Select(a => new { a.Plan.CandidateKey, trackId = a.Stock.Item.Tracks.Single().Id, a.Destination }).ToList(),
-                kept = plan.Decisions.Where(d => d.Action == MergeAction.KeepExisting).Select(d => d.CandidateKey).ToList()
+                additions = additions.Select(a => new { a.TrackId, a.DestinationPath }).ToList(),
+                kept = kept.Select(k => new { k.TrackId, k.TrackFileId, k.Path }).ToList()
             }), replace: false);
-            CrescendarrGuard.Emit(_logger, $"OPERATION_PUBLISHED op={operationId} upgrades={upgrades.Count} additions={additions.Count} albumLyricBackups={albumLyrics.Count}");
 
-            // 5. M13 write-ahead journal for every destructive replacement.
-            var outcome = "Completed";
-            if (upgrades.Count > 0)
+            // 5. ONE write-ahead journal for the whole operation, published before any destructive step.
+            var binding = new OperationBinding(operationId,
+                InventoryText.IsValidDownloadId(item.DownloadId) ? new DownloadBinding(clientId, item.DownloadId, null) : null,
+                staged.Album.Id, staged.Album.ForeignAlbumId, staged.MonitoredRelease.Id, staged.MonitoredRelease.ForeignReleaseId,
+                PathStyle.Posix, Path.GetFullPath(_rootFolders.GetBestRootFolder(staged.Artist.Path).Path).TrimEnd('/'), staging, opRoot,
+                upgrades.ToImmutableArray(), artistRoot)
             {
-                var binding = new OperationBinding(operationId,
-                    InventoryText.IsValidDownloadId(item.DownloadId) ? new DownloadBinding(clientId, item.DownloadId, null) : null,
-                    staged.Album.Id, staged.Album.ForeignAlbumId, staged.MonitoredRelease.Id, staged.MonitoredRelease.ForeignReleaseId,
-                    PathStyle.Posix, Path.GetFullPath(_rootFolders.GetBestRootFolder(staged.Artist.Path).Path).TrimEnd('/'), staging, opRoot,
-                    upgrades.ToImmutableArray(), artistRoot);
-                var manifest = JournalEngine.Begin(binding);
-                Save(opRoot, manifest);
-                outcome = RunJournal(context, manifest);
+                Additions = additions.ToImmutableArray(),
+                Kept = kept.ToImmutableArray(),
+                AlbumLyrics = albumLyrics.ToImmutableArray(),
+            };
+            var manifest = JournalEngine.Begin(binding);
+            Save(opRoot, manifest);
+            context.Manifest = manifest;
+            CrescendarrGuard.Emit(_logger, $"OPERATION_PUBLISHED op={operationId} upgrades={upgrades.Count} additions={additions.Count} kept={kept.Count} albumLyricBackups={albumLyrics.Count}");
+
+            string outcome;
+            try
+            {
+                outcome = RunJournal(context);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                outcome = FailClosed(context, error);
             }
 
-            if (outcome == "Completed") outcome = AddMissing(context, additions.Select(a => a.Stock).ToList());
-            Finish(context, outcome);
+            if (!Finish(context, outcome)) throw new CommandFailedException($"Crescendarr operation {operationId} ended {outcome}.");
         }
 
         // ------------------------------------------------------------------ recovery after restart
@@ -253,91 +299,84 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 return;
             }
 
+            Disk.RequireConfined(root, ops, "operation folder");
+            var failures = new List<string>();
             foreach (var opRoot in Directory.GetDirectories(ops).OrderBy(d => d, StringComparer.Ordinal))
             {
-                if (File.Exists(Path.Combine(opRoot, "outcome.json")))
+                var outcomeFile = Path.Combine(opRoot, "outcome.json");
+                if (File.Exists(outcomeFile))
                 {
-                    // Sticky: a finished or RequiresReview operation is never resumed automatically.
-                    CrescendarrGuard.Emit(_logger, $"RECOVERY_SKIP op={Path.GetFileName(opRoot)} {File.ReadAllText(Path.Combine(opRoot, "outcome.json"))}");
+                    // Sticky: a finished, abandoned or RequiresReview operation is never resumed automatically.
+                    CrescendarrGuard.Emit(_logger, $"RECOVERY_SKIP op={Path.GetFileName(opRoot)} {File.ReadAllText(outcomeFile)}");
                     continue;
                 }
-                var operation = JsonDocument.Parse(File.ReadAllText(Path.Combine(opRoot, "operation.json"))).RootElement;
-                var staging = operation.GetProperty("staging").GetString();
-                var journalPath = Path.Combine(opRoot, "journal.json");
-                var context = new OperationContext
-                {
-                    Root = root, OperationRoot = opRoot,
-                    Album = _albums.GetAlbum(operation.GetProperty("albumId").GetInt32()),
-                    Artist = _artists.GetArtist(operation.GetProperty("artistId").GetInt32()),
-                    ArtistMbid = operation.GetProperty("artistMbid").GetString(),
-                    Staging = staging
-                };
-                var downloadFolder = operation.GetProperty("downloadFolder").GetString();
-                var candidates = operation.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
-                context.LoadStagedDecisions = () => RefillAndDecide(context, downloadFolder, candidates);
-                var outcome = "Completed";
-                if (File.Exists(journalPath))
-                {
-                    var load = JournalCodec.Decode(File.ReadAllText(journalPath), Path.GetFileName(opRoot));
-                    if (!load.Succeeded)
-                    {
-                        Finish(context, "RequiresReview", "journal unreadable: " + load.Error);
-                        continue;
-                    }
 
-                    var manifest = load.Manifest;
-                    CrescendarrGuard.Emit(_logger, $"RECOVERY_START op={Path.GetFileName(opRoot)} status={manifest.Status} generation={manifest.Generation}");
-                    outcome = RunJournal(context, manifest);
+                var context = new OperationContext { Root = root, OperationId = Path.GetFileName(opRoot), OperationRoot = opRoot, Approve = message.Approve };
+                string outcome;
+                try
+                {
+                    outcome = RecoverOne(context);
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    outcome = FailClosed(context, error);
                 }
 
-                if (outcome == "Completed" && context.StagedDecisionByTrack.Count == 0 && !context.LoadStagedDecisions())
-                {
-                    outcome = "RequiresReview";
-                }
-
-                if (outcome == "Completed")
-                {
-                    var additions = new List<ImportDecision<LocalTrack>>();
-                    foreach (var add in operation.GetProperty("additions").EnumerateArray())
-                    {
-                        var trackId = add.GetProperty("trackId").GetInt32();
-                        var current = _tracks.GetTrack(trackId);
-                        if (current.TrackFileId > 0)
-                        {
-                            CrescendarrGuard.Emit(_logger, $"RECOVERY_ADD_ALREADY_LINKED track={trackId} trackFile={current.TrackFileId}");
-                            continue;
-                        }
-
-                        if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision))
-                        {
-                            outcome = "RequiresReview";
-                            CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW add-missing track={trackId} has no staged copy and no linked file");
-                            break;
-                        }
-
-                        additions.Add(decision);
-                    }
-
-                    if (outcome == "Completed") outcome = AddMissing(context, additions);
-                }
-
-                Finish(context, outcome);
+                if (!Finish(context, outcome) && outcome != Abandoned) failures.Add($"{context.OperationId}={outcome}");
             }
+
+            if (failures.Count > 0) throw new CommandFailedException("Crescendarr recovery did not complete: " + string.Join(", ", failures));
+        }
+
+        private string RecoverOne(OperationContext context)
+        {
+            var opRoot = context.OperationRoot;
+            var journalPath = Path.Combine(opRoot, "journal.json");
+            var operationPath = Path.Combine(opRoot, "operation.json");
+            if (!File.Exists(journalPath))
+            {
+                // The journal is published before any destructive step: without it nothing destructive happened.
+                CrescendarrGuard.Emit(_logger, $"RECOVERY_ABANDON op={context.OperationId} journal never published; nothing destructive ran");
+                return Abandoned;
+            }
+
+            var load = JournalCodec.Decode(File.ReadAllText(journalPath), context.OperationId);
+            if (!load.Succeeded) return RequiresReviewWithoutJournal(context, "journal unreadable: " + load.Error);
+            context.Manifest = load.Manifest;
+            if (!File.Exists(operationPath)) return RequiresReviewWithoutJournal(context, "operation record missing");
+            var operation = JsonDocument.Parse(File.ReadAllText(operationPath)).RootElement;
+            context.Staging = operation.GetProperty("staging").GetString();
+            context.Album = _albums.GetAlbum(operation.GetProperty("albumId").GetInt32());
+            context.Artist = _artists.GetArtist(operation.GetProperty("artistId").GetInt32());
+            context.ArtistMbid = operation.GetProperty("artistMbid").GetString();
+            var downloadFolder = operation.GetProperty("downloadFolder").GetString();
+            var candidates = operation.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
+            context.LoadStagedDecisions = () => RefillAndDecide(context, downloadFolder, candidates);
+            CrescendarrGuard.Emit(_logger, $"RECOVERY_START op={context.OperationId} status={context.Manifest.Status} generation={context.Manifest.Generation}");
+            return RunJournal(context);
+        }
+
+        private string RequiresReviewWithoutJournal(OperationContext context, string why)
+        {
+            context.Proposal = null;
+            CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW op={context.OperationId} {why}");
+            return RequiresReview + ":" + why;
         }
 
         /// <summary>
         /// Recovery: refill consumed staged copies from the STILL-INTACT completed download (hash-verified against the
         /// operation record), then recompute stock NEW-download decisions on the complete album. Never from stored
-        /// command bodies, never NewDownload=false. Called lazily, never while a native step is declared in flight.
+        /// command bodies, never NewDownload=false. Called lazily, only for a not-yet-declared native step.
         /// </summary>
         private bool RefillAndDecide(OperationContext context, string downloadFolder, Dictionary<string, string> candidates)
         {
+            Disk.RequireConfined(context.Root, context.Staging, "staging folder");
             foreach (var (key, sha) in candidates)
             {
                 var staged = Path.Combine(context.Staging, key);
                 if (File.Exists(staged)) continue;
                 var source = Path.Combine(downloadFolder, key);
-                if (!File.Exists(source) || Disk.HasLinkInChain(source, context.Root) || Disk.Sha(source) != sha)
+                if (!Disk.IsRegularFile(context.Root, source) || Disk.Sha(source) != sha)
                 {
                     CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW completed download changed or vanished: {key}");
                     return false;
@@ -357,25 +396,39 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         }
 
         /// <summary>Only a stock NEW-download decision on an operation-owned staged copy may reach the native importer.</summary>
-        private static bool SafeDecision(OperationContext context, ImportDecision<LocalTrack> decision) =>
+        private static bool SafeDecision(OperationContext context, ImportDecision<LocalTrack> decision, string boundIncoming, ContentId incoming) =>
             decision.Approved && !decision.Item.ExistingFile && context.Staging != null &&
-            Disk.IsUnder(context.Staging.TrimEnd('/'), Path.GetFullPath(decision.Item.Path));
+            Disk.IsUnder(context.Staging.TrimEnd('/'), Path.GetFullPath(decision.Item.Path)) &&
+            Path.GetFullPath(decision.Item.Path) == boundIncoming && Disk.IsRegularFile(context.Root, boundIncoming) && Disk.Sha(boundIncoming) == incoming.Sha256;
 
-        // ------------------------------------------------------------------ M13 journal loop
+        // ------------------------------------------------------------------ the one journal loop
 
-        private string RunJournal(OperationContext context, OperationManifest manifest)
+        private string RunJournal(OperationContext context)
         {
+            var manifest = context.Manifest;
             var nativeCount = 0;
-            for (var guard = 0; guard < 500; guard++)
+            var approvalUsed = false;
+            string Review(string reason)
             {
+                if (manifest.Status == OperationStatus.Active)
+                {
+                    manifest = JournalEngine.MarkReview(manifest, reason);
+                    Save(context.OperationRoot, manifest);
+                    context.Manifest = manifest;
+                }
+
+                CrescendarrGuard.Emit(_logger, "JOURNAL_REVIEW " + reason);
+                return RequiresReview;
+            }
+
+            for (var guard = 0; guard < 1000; guard++)
+            {
+                context.Manifest = manifest;
+
                 // PR #42 review: revalidate the FRESH artist MusicBrainz identity before every step.
                 var freshArtist = _artists.GetArtist(context.Artist.Id);
                 if (!string.Equals(freshArtist?.Metadata?.Value?.ForeignArtistId, context.ArtistMbid, StringComparison.OrdinalIgnoreCase) && manifest.Status == OperationStatus.Active)
-                {
-                    manifest = JournalEngine.MarkReview(manifest, "artist MusicBrainz identity changed");
-                    Save(context.OperationRoot, manifest);
-                    return "RequiresReview";
-                }
+                    return Review("artist MusicBrainz identity changed");
 
                 var host = HostSnapshot(manifest, context.Artist.Id);
                 var fs = Observe(context.Root, manifest);
@@ -386,140 +439,247 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 switch (verdict.Verdict)
                 {
                     case Verdict.Completed:
-                        return "Completed";
+                        return Completed;
                     case Verdict.OperatorApprovalRequired:
-                        return "OperatorApprovalRequired";
+                        context.Proposal = next;
+                        if (!approvalUsed && next?.Action == RecoveryAction.InsertFreshTrackFileForIncoming && next.TrackId is { } placedTrack &&
+                            string.Equals(context.Approve, $"{context.OperationId}:{placedTrack}:register-placed", StringComparison.Ordinal))
+                        {
+                            approvalUsed = true;
+                            if (RegisterPlaced(context, manifest, placedTrack)) continue;
+                        }
+
+                        return OperatorApprovalRequired;
                     case Verdict.RequiresReview:
+                        context.Proposal = next is { Mode: ActionMode.OperatorApproval } ? next : null;
                         if (next?.Action == RecoveryAction.MarkReview && manifest.Status == OperationStatus.Active)
                         {
                             manifest = JournalEngine.MarkReview(manifest, next.Reason);
                             Save(context.OperationRoot, manifest);
+                            context.Manifest = manifest;
                         }
 
-                        return "RequiresReview";
+                        return RequiresReview;
                 }
 
-                if (next == null) return "RequiresReview";
+                if (next == null) return Review("reconciler proposed no next step");
                 var trackId = next.TrackId ?? 0;
-                var binding = trackId > 0 ? manifest.BindingFor(trackId) : null;
-                var progress = trackId > 0 ? manifest.ProgressFor(trackId) : null;
-                JournalStep? Declared(JournalStep step)
+                var isAddition = trackId > 0 && manifest.IsAddition(trackId);
+                var binding = trackId > 0 && !isAddition && manifest.Binding.Tracks.Any(t => t.TrackId == trackId) ? manifest.BindingFor(trackId) : null;
+                var progress = binding != null ? manifest.ProgressFor(trackId) : null;
+                void Declared(JournalStep step)
                 {
-                    if (progress.InFlight == null)
-                    {
-                        manifest = JournalEngine.MarkInFlight(manifest, trackId, step);
-                        Save(context.OperationRoot, manifest);
-                    }
-
-                    return step;
+                    if (progress.InFlight != null) return;
+                    manifest = JournalEngine.MarkInFlight(manifest, trackId, step);
+                    Save(context.OperationRoot, manifest);
                 }
 
                 switch (next.Action)
                 {
                     case RecoveryAction.CopyBackup:
                         Declared(JournalStep.CopyBackup);
-                        CopyIfAbsent(binding.OriginalPath, binding.BackupAudioPath, binding.Original.Sha256);
-                        if (binding.Lyric != null) CopyIfAbsent(binding.Lyric.Path, binding.Lyric.BackupPath, binding.Lyric.Content.Sha256);
+                        CopyIfAbsent(context.Root, binding.OriginalPath, binding.BackupAudioPath, binding.Original.Sha256);
+                        if (binding.Lyric != null) CopyIfAbsent(context.Root, binding.Lyric.Path, binding.Lyric.BackupPath, binding.Lyric.Content.Sha256);
                         break;
                     case RecoveryAction.DetachLyric:
+                        Disk.RequireConfined(context.Root, binding.Lyric.Path, "bound lyric");
                         Declared(JournalStep.DetachLyric);
                         _lyrics.Delete(binding.Lyric.LyricFileId);
                         break;
                     case RecoveryAction.InvokeNativeUpgrade:
-                        if (!context.StagedDecisionByTrack.ContainsKey(trackId) && context.LoadStagedDecisions != null && !context.LoadStagedDecisions()) return "RequiresReview";
-                        if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision) || !SafeDecision(context, decision))
-                        {
-                            CrescendarrGuard.Emit(_logger, $"NATIVE_REFUSED track={trackId} no safe staged new-download decision");
-                            return "RequiresReview";
-                        }
-
+                    {
+                        if (!context.StagedDecisionByTrack.ContainsKey(trackId) && context.LoadStagedDecisions != null && !context.LoadStagedDecisions())
+                            return Review("completed download changed or vanished; cannot re-stage the replacement");
+                        if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision) || !SafeDecision(context, decision, binding.IncomingPath, binding.Incoming))
+                            return Review($"track {trackId}: no safe staged new-download decision for the bound incoming file");
+                        if (Destination(decision, context.Artist, context.Album) != binding.DestinationPath)
+                            return Review($"track {trackId}: stock destination differs from the bound destination");
+                        Disk.RequireConfined(context.Root, Path.GetDirectoryName(binding.DestinationPath), "replacement destination folder");
+                        Disk.RequireConfined(context.Root, binding.OriginalPath, "replacement original");
                         Declared(JournalStep.NativeUpgrade);
-                        var results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
+                        List<ImportResult> results;
+                        using (ImportScope.Enter(context.Root, context.OperationRoot, trackId, "upgrade"))
+                            results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
                         nativeCount++;
-                        CrescendarrGuard.Emit(_logger, $"NATIVE_IMPORT track={trackId} results=[{string.Join(",", results.Select(r => r.Result + ":" + string.Join("|", r.Errors)))}]");
-                        FaultPoint(context.Root, "after-native-" + nativeCount);
+                        CrescendarrGuard.Emit(_logger, $"NATIVE_IMPORT kind=upgrade track={trackId} results=[{Results(results)}]");
+                        Faults.Point(_logger, context.Root, "after-native-" + nativeCount);
                         break;
+                    }
+
+                    case RecoveryAction.InvokeNativeAdd:
+                    {
+                        var add = manifest.AdditionBindingFor(trackId);
+                        if (!context.StagedDecisionByTrack.ContainsKey(trackId) && context.LoadStagedDecisions != null && !context.LoadStagedDecisions())
+                            return Review("completed download changed or vanished; cannot re-stage the addition");
+                        if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision) || !SafeDecision(context, decision, add.IncomingPath, add.Incoming))
+                            return Review($"addition {trackId}: no safe staged new-download decision for the bound incoming file");
+                        if (Destination(decision, context.Artist, context.Album) != add.DestinationPath)
+                            return Review($"addition {trackId}: stock destination differs from the bound destination");
+                        Disk.RequireConfined(context.Root, Path.GetDirectoryName(add.DestinationPath), "addition destination folder");
+                        if (Disk.Occupied(add.DestinationPath)) return Review($"addition {trackId}: destination occupied (refusing to overwrite)");
+                        manifest = JournalEngine.MarkAdditionInFlight(manifest, trackId);
+                        Save(context.OperationRoot, manifest);
+                        List<ImportResult> results;
+                        using (ImportScope.Enter(context.Root, context.OperationRoot, trackId, "add"))
+                            results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
+                        nativeCount++;
+                        CrescendarrGuard.Emit(_logger, $"NATIVE_IMPORT kind=add track={trackId} results=[{Results(results)}]");
+                        Faults.Point(_logger, context.Root, "after-native-" + nativeCount);
+                        break;
+                    }
+
                     case RecoveryAction.RelinkLyric:
+                    {
+                        var target = next.NewTrackFileId ?? progress.NewTrackFileId.Value;
+                        Disk.RequireConfined(context.Root, binding.Lyric.Path, "bound lyric");
                         Declared(JournalStep.RelinkLyric);
-                        _lyrics.Upsert(new LyricFile
-                        {
-                            ArtistId = context.Artist.Id, AlbumId = manifest.Binding.AlbumId, TrackFileId = progress.NewTrackFileId.Value,
-                            RelativePath = binding.Lyric.RelativePath, Extension = Path.GetExtension(binding.Lyric.RelativePath),
-                            Added = DateTime.UtcNow, LastUpdated = DateTime.UtcNow
-                        });
+                        // Re-read immediately before the insert; any row that appeared meanwhile goes back to the reconciler.
+                        if (_lyrics.GetFilesByArtist(context.Artist.Id).Any(l => string.Equals(l.RelativePath, binding.Lyric.RelativePath, StringComparison.OrdinalIgnoreCase)) ||
+                            _tracks.GetTrack(trackId).TrackFileId != target)
+                            break;
+                        _lyrics.Upsert(NewLyricRow(context, manifest.Binding.AlbumId, target, binding.Lyric.RelativePath));
                         break;
+                    }
+
                     case RecoveryAction.RecordStepDone:
-                        manifest = JournalEngine.MarkDone(manifest, trackId, progress.InFlight.Value, next.NewTrackFileId, next.NewLyricFileId);
+                        manifest = isAddition
+                            ? JournalEngine.MarkAdditionDone(manifest, trackId, next.NewTrackFileId)
+                            : JournalEngine.MarkDone(manifest, trackId, progress.InFlight.Value, next.NewTrackFileId, next.NewLyricFileId);
                         Save(context.OperationRoot, manifest);
                         break;
                     case RecoveryAction.AbandonStep:
-                        manifest = JournalEngine.AbandonInFlight(manifest, trackId, progress.InFlight.Value);
+                        manifest = isAddition ? JournalEngine.AbandonAddition(manifest, trackId) : JournalEngine.AbandonInFlight(manifest, trackId, progress.InFlight.Value);
                         Save(context.OperationRoot, manifest);
                         break;
                     case RecoveryAction.RestoreOriginalBytes:
+                        Disk.RequireConfined(context.Root, binding.OriginalPath, "replacement original");
                         Disk.CopyVerified(binding.BackupAudioPath, binding.OriginalPath, binding.Original.Sha256);
                         break;
+                    case RecoveryAction.RestoreAlbumLyric:
+                    {
+                        var lyric = manifest.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
+                        Disk.RequireConfined(context.Root, lyric.Path, "album lyric");
+                        Disk.RequireConfined(context.Root, lyric.BackupPath, "album lyric backup");
+                        if (Disk.Occupied(lyric.Path)) break; // never overwrite; the reconciler re-evaluates what appeared
+                        Disk.CopyVerified(lyric.BackupPath, lyric.Path, lyric.Content.Sha256);
+                        CrescendarrGuard.Emit(_logger, $"RESTORE_ALBUM_LYRIC track={lyric.TrackId} \"{lyric.RelativePath}\" from verified backup sha={lyric.Content.Sha256[..12]}");
+                        break;
+                    }
+
+                    case RecoveryAction.BindAlbumLyric:
+                    {
+                        var lyric = manifest.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
+                        var current = _tracks.GetTrack(lyric.TrackId).TrackFileId;
+                        if (current != next.NewTrackFileId ||
+                            _lyrics.GetFilesByArtist(context.Artist.Id).Any(l => string.Equals(l.RelativePath, lyric.RelativePath, StringComparison.OrdinalIgnoreCase)))
+                            break; // drift since the snapshot: reconcile again before any insert
+                        _lyrics.Upsert(NewLyricRow(context, manifest.Binding.AlbumId, current, lyric.RelativePath));
+                        CrescendarrGuard.Emit(_logger, $"BIND_ALBUM_LYRIC track={lyric.TrackId} \"{lyric.RelativePath}\" -> current trackFile={current}");
+                        break;
+                    }
+
                     case RecoveryAction.CompleteOperation:
                         manifest = JournalEngine.Complete(manifest);
                         Save(context.OperationRoot, manifest);
                         break;
                     case RecoveryAction.MarkReview:
-                        manifest = JournalEngine.MarkReview(manifest, next.Reason);
-                        Save(context.OperationRoot, manifest);
-                        return "RequiresReview";
+                        return Review(next.Reason);
                     default:
-                        return "RequiresReview";
+                        return Review("unsupported automatic action " + next.Action);
                 }
             }
 
-            return "RequiresReview";
+            return Review("journal loop did not converge");
         }
 
-        private string AddMissing(OperationContext context, List<ImportDecision<LocalTrack>> additions)
+        /// <summary>
+        /// OPERATOR-APPROVED only. The native import moved a file into the library but crashed before inserting its row.
+        /// Register exactly that file through the stock importer as an existing library file (no album rescan, so no
+        /// cascade). Every precondition is re-read; any doubt leaves the operation awaiting approval.
+        /// </summary>
+        private bool RegisterPlaced(OperationContext context, OperationManifest manifest, int trackId)
         {
-            foreach (var stock in additions)
+            var (destination, incoming) = manifest.IsAddition(trackId)
+                ? (manifest.AdditionBindingFor(trackId).DestinationPath, manifest.AdditionBindingFor(trackId).Incoming)
+                : (manifest.BindingFor(trackId).DestinationPath, manifest.BindingFor(trackId).Incoming);
+            Disk.RequireConfined(context.Root, destination, "placed file");
+            if (!Disk.IsRegularFile(context.Root, destination) || Disk.Sha(destination) != incoming.Sha256 || _mediaFiles.GetFileWithPath(new List<string> { destination }).Count > 0 ||
+                _tracks.GetTrack(trackId).TrackFileId != 0)
             {
-                var track = stock.Item.Tracks.Single();
-                var fresh = _tracks.GetTrack(track.Id);
-                // Predict the stock destination from THIS decision (naming can depend on how it was identified).
-                var destination = _fileNames.BuildTrackFilePath(stock.Item.Tracks, context.Artist, context.Album,
-                    new TrackFile { Path = stock.Item.Path, SceneName = stock.Item.SceneName }, Path.GetExtension(stock.Item.Path));
-                if (fresh.TrackFileId != 0 || File.Exists(destination) || !SafeDecision(context, stock) ||
-                    !Disk.IsUnder(context.Artist.Path.TrimEnd('/'), destination) || Disk.HasLinkInChain(Path.GetDirectoryName(destination), context.Root))
+                CrescendarrGuard.Emit(_logger, $"REGISTER_REFUSED track={trackId} preconditions no longer hold");
+                return false;
+            }
+
+            var decision = _adapter.DecideExistingLibraryFile(context.Artist, destination);
+            if (decision == null || !decision.Approved || !decision.Item.ExistingFile || decision.Item.Tracks?.Count != 1 || decision.Item.Tracks[0].Id != trackId ||
+                decision.Item.Album?.Id != manifest.Binding.AlbumId || decision.Item.Release?.Id != manifest.Binding.MonitoredReleaseId)
+            {
+                CrescendarrGuard.Emit(_logger, $"REGISTER_REFUSED track={trackId} stock decision does not match exactly this track and edition: " +
+                    (decision == null ? "none" : $"approved={decision.Approved} existing={decision.Item.ExistingFile} rejections={string.Join("|", decision.Rejections.Select(r => r.Reason))}"));
+                return false;
+            }
+
+            var results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Auto);
+            CrescendarrGuard.Emit(_logger, $"REGISTER_PLACED track={trackId} path=\"{destination}\" results=[{Results(results)}] (operator approved)");
+            return true;
+        }
+
+        private string FailClosed(OperationContext context, Exception error)
+        {
+            CrescendarrGuard.Emit(_logger, $"OPERATION_EXCEPTION op={context.OperationId} {error.GetType().Name}: {error.Message}");
+            if (context.Manifest is { Status: OperationStatus.Active } manifest)
+            {
+                context.Manifest = JournalEngine.MarkReview(manifest, "unexpected " + error.GetType().Name + ": " + error.Message);
+                Save(context.OperationRoot, context.Manifest);
+            }
+
+            return RequiresReview;
+        }
+
+        // ------------------------------------------------------------------ outcome, summary and verification
+
+        private bool Finish(OperationContext context, string outcome)
+        {
+            string detail = null;
+            var colon = outcome.IndexOf(':');
+            if (colon > 0)
+            {
+                detail = outcome[(colon + 1)..];
+                outcome = outcome[..colon];
+            }
+
+            if (outcome == Completed)
+            {
+                var verified = VerifyAlbumLyrics(context);
+                if (verified != null)
                 {
-                    CrescendarrGuard.Emit(_logger, $"ADD_MISSING_REVIEW track={track.Id} host changed, destination occupied or decision not approved: {destination}");
-                    return "RequiresReview";
+                    outcome = RequiresReview;
+                    detail = verified;
                 }
-
-                var sha = Disk.Sha(stock.Item.Path);
-                var results = _importer.Import(new List<ImportDecision<LocalTrack>> { stock }, false, null, ImportMode.Move);
-                var linked = _tracks.GetTrack(track.Id);
-                var row = linked.TrackFileId > 0 ? _mediaFiles.Get(linked.TrackFileId) : null;
-                var ok = results.Count == 1 && results[0].Result == ImportResultType.Imported && row?.Path == destination && Disk.Sha(destination) == sha;
-                CrescendarrGuard.Emit(_logger, $"ADD_MISSING track={track.Id} ok={ok} trackFile={linked.TrackFileId} predicted=\"{destination}\" actual=\"{row?.Path}\" " +
-                    $"bytesMatch={(row != null && File.Exists(row.Path) && Disk.Sha(row.Path) == sha)} results=[{string.Join(",", results.Select(r => r.Result + ":" + string.Join("|", r.Errors)))}]");
-                if (!ok) return "RequiresReview";
-            }
-
-            return "Completed";
-        }
-
-        private void Finish(OperationContext context, string outcome, string detail = null)
-        {
-            var verified = outcome == "Completed" ? VerifyAlbumLyrics(context) : null;
-            if (verified != null)
-            {
-                outcome = "RequiresReview";
-                detail = verified;
             }
 
             // Completion cleanup: operation-owned staged copies only. Backups, journal and the completed download stay.
-            if (outcome == "Completed" && context.Staging != null && Directory.Exists(context.Staging) && Disk.IsUnder(context.Root, context.Staging))
+            if (outcome == Completed && context.Staging != null && Directory.Exists(context.Staging) && Disk.IsUnder(context.Root, context.Staging) &&
+                !Disk.HasLinkInChain(context.Staging, context.Root))
                 Directory.Delete(context.Staging, recursive: true);
-            Disk.WriteDurable(Path.Combine(context.OperationRoot, "outcome.json"),
-                JsonSerializer.Serialize(new { outcome, detail, utc = DateTime.UtcNow }), replace: false);
-            CrescendarrGuard.Emit(_logger, $"IMPORT_OUTCOME op={Path.GetFileName(context.OperationRoot)} outcome={outcome} detail=\"{detail}\"");
-            if (outcome != "Completed") throw new CommandFailedException($"Crescendarr operation ended {outcome}: {detail}");
+            if (outcome is RequiresReview or OperatorApprovalRequired) WriteSummary(context, outcome, detail);
+
+            // OperatorApprovalRequired is not terminal (the album stays blocked; recovery re-evaluates). Everything else is sticky.
+            if (outcome != OperatorApprovalRequired)
+            {
+                Disk.WriteDurable(Path.Combine(context.OperationRoot, "outcome.json"), JsonSerializer.Serialize(new
+                {
+                    outcome, detail,
+                    operationComplete = outcome == Completed,
+                    success = outcome == Completed,
+                    downloadSettled = false,
+                    settlement = "Completed Download Handling is OFF: Crescendarr never settles or removes the client item; this outcome is NOT host/download-client settlement.",
+                    utc = DateTime.UtcNow
+                }), replace: false);
+            }
+
+            CrescendarrGuard.Emit(_logger, $"IMPORT_OUTCOME op={context.OperationId} outcome={outcome} detail=\"{detail}\" downloadSettled=false");
+            return outcome == Completed;
         }
 
         /// <summary>Every album lyric backed up before the operation must still exist with identical bytes and be registered.</summary>
@@ -532,13 +692,96 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             {
                 var relative = lyric.GetProperty("RelativePath").GetString();
                 var path = Path.Combine(context.Artist.Path, relative);
-                if (!File.Exists(path) || Disk.Sha(path) != lyric.GetProperty("sha").GetString()) return "album lyric bytes changed: " + relative;
+                if (!Disk.IsRegularFile(context.Root, path) || Disk.Sha(path) != lyric.GetProperty("sha").GetString()) return "album lyric bytes changed: " + relative;
                 var trackId = lyric.GetProperty("trackId").GetInt32();
                 var current = _tracks.GetTrack(trackId);
-                if (rows.Count(r => r.RelativePath == relative && r.TrackFileId == current.TrackFileId) != 1) return "album lyric not registered to its track's current file: " + relative;
+                if (current.TrackFileId <= 0 || rows.Count(r => r.RelativePath == relative && r.TrackFileId == current.TrackFileId) != 1)
+                    return "album lyric not registered to its track's current file: " + relative;
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// M18 P1: inspectable operator summary. Pre/post physical hashes, TrackFile IDs, release/recording/release-track
+        /// identity, lyric linkage and the refusal reasons. It never claims settlement or success.
+        /// </summary>
+        private void WriteSummary(OperationContext context, string outcome, string detail)
+        {
+            try
+            {
+                var manifest = context.Manifest;
+                string Sha(string path) => path != null && Disk.IsRegularFile(context.Root, path) ? Disk.Sha(path) : null;
+                Track Fresh(int id)
+                {
+                    try { return _tracks.GetTrack(id); }
+                    catch (Exception) { return null; }
+                }
+
+                object Observed(int trackId, string expectedPath)
+                {
+                    var track = Fresh(trackId);
+                    var row = track == null || track.TrackFileId <= 0 ? null : ExistingRows(new[] { track.TrackFileId }).FirstOrDefault();
+                    return new
+                    {
+                        releaseTrackMbid = track?.ForeignTrackId, recordingMbid = track?.ForeignRecordingId, albumReleaseId = track?.AlbumReleaseId,
+                        linkedTrackFileId = track?.TrackFileId, linkedRowExists = row != null, rowPath = row?.Path, shaAtExpectedPath = Sha(expectedPath)
+                    };
+                }
+
+                var lyricRows = context.Artist == null ? new List<LyricFile>() : _lyrics.GetFilesByArtist(context.Artist.Id);
+                var b = manifest?.Binding;
+                var summary = new
+                {
+                    operationId = context.OperationId, status = outcome, detail, settled = false, success = false,
+                    meaning = "NOT settled and NOT successful. The completed download is left in place. Nothing runs automatically for this album until an operator resolves it. Backups are kept.",
+                    reasons = manifest == null ? new List<string> { detail } : manifest.ReviewReasons.ToList(),
+                    proposal = context.Proposal == null ? null : new
+                    {
+                        action = context.Proposal.Action.ToString(), trackId = context.Proposal.TrackId, mode = context.Proposal.Mode.ToString(), reason = context.Proposal.Reason,
+                        approve = context.Proposal.Action == RecoveryAction.InsertFreshTrackFileForIncoming ? $"{context.OperationId}:{context.Proposal.TrackId}:register-placed" : null
+                    },
+                    operatorAction = outcome == OperatorApprovalRequired
+                        ? "Either dispatch CrescendarrRecover with the 'approve' token above (registers ONLY the placed file through the stock importer; no album rescan), " +
+                          "or run a stock RescanFolders for the artist and then CrescendarrRecover (the rescan re-imports the whole album and recycles registered lyrics; recovery restores them from the verified backups)."
+                        : "Inspect the files and rows below; compare them with the verified backups under the operation folder. Crescendarr will not modify this album again automatically.",
+                    journal = manifest == null ? null : new { manifest.Status, manifest.Generation },
+                    monitoredRelease = b == null ? null : new
+                    {
+                        b.MonitoredReleaseId, b.MonitoredReleaseMbid,
+                        observedMonitored = _releases.GetReleasesByAlbum(b.AlbumId).Where(r => r.Monitored).Select(r => new { r.Id, r.ForeignReleaseId }).ToList()
+                    },
+                    tracks = b == null ? null : b.Tracks.Select(t => (object)new
+                    {
+                        role = "upgrade", t.TrackId, t.RecordingMbid, phase = manifest.ProgressFor(t.TrackId).Phase.ToString(), inFlight = manifest.ProgressFor(t.TrackId).InFlight?.ToString(),
+                        original = new { trackFileId = t.OriginalTrackFileId, path = t.OriginalPath, sha = t.Original.Sha256, backup = t.BackupAudioPath, backupSha = Sha(t.BackupAudioPath) },
+                        expected = new { path = t.DestinationPath, sha = t.Incoming.Sha256, recordedTrackFileId = manifest.ProgressFor(t.TrackId).NewTrackFileId },
+                        observed = Observed(t.TrackId, t.DestinationPath)
+                    }).Concat(b.Additions.Select(a => (object)new
+                    {
+                        role = "add", a.TrackId, a.RecordingMbid, phase = manifest.AdditionFor(a.TrackId).Phase.ToString(), inFlight = manifest.AdditionFor(a.TrackId).InFlight,
+                        expected = new { path = a.DestinationPath, sha = a.Incoming.Sha256, recordedTrackFileId = manifest.AdditionFor(a.TrackId).NewTrackFileId },
+                        observed = Observed(a.TrackId, a.DestinationPath)
+                    })).Concat(b.Kept.Select(k => (object)new
+                    {
+                        role = "kept", k.TrackId, k.RecordingMbid,
+                        expected = new { path = k.Path, sha = k.Content.Sha256, originalTrackFileId = k.TrackFileId },
+                        observed = Observed(k.TrackId, k.Path)
+                    })).ToList(),
+                    albumLyrics = b == null ? null : b.AlbumLyrics.Select(l => new
+                    {
+                        originalLyricFileId = l.LyricFileId, l.TrackId, l.RelativePath, sha = l.Content.Sha256, observedSha = Sha(l.Path),
+                        rows = lyricRows.Where(r => string.Equals(r.RelativePath, l.RelativePath, StringComparison.OrdinalIgnoreCase)).Select(r => new { r.Id, r.TrackFileId }).ToList(),
+                        backup = l.BackupPath, backupSha = Sha(l.BackupPath), backupOk = Sha(l.BackupPath) == l.Content.Sha256
+                    }).ToList(),
+                    utc = DateTime.UtcNow
+                };
+                Disk.WriteDurable(Path.Combine(context.OperationRoot, "review.json"), JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }), replace: true);
+            }
+            catch (Exception error)
+            {
+                CrescendarrGuard.Emit(_logger, "REVIEW_SUMMARY_FAILED " + error.GetType().Name + ": " + error.Message);
+            }
         }
 
         private void Refuse(CrescendarrImportCommand message, string why, Observation observed)
@@ -546,8 +789,82 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             CrescendarrGuard.Emit(_logger, $"IMPORT_REFUSED download=\"{message.DownloadId}\" reason=\"{why}\" mutations=0 {_adapter.Describe(observed)}");
         }
 
+        /// <summary>Operation IDs for this album that are not finished (no outcome, or an outcome other than Completed/Abandoned).</summary>
+        private static List<string> UnfinishedOperations(string root, int albumId)
+        {
+            var ops = Path.Combine(root, "crescendarr", "ops");
+            var result = new List<string>();
+            if (!Directory.Exists(ops)) return result;
+            foreach (var opRoot in Directory.GetDirectories(ops))
+            {
+                var operation = Path.Combine(opRoot, "operation.json");
+                if (!File.Exists(operation) || JsonDocument.Parse(File.ReadAllText(operation)).RootElement.GetProperty("albumId").GetInt32() != albumId) continue;
+                var outcome = Path.Combine(opRoot, "outcome.json");
+                var finished = File.Exists(outcome) && JsonDocument.Parse(File.ReadAllText(outcome)).RootElement.GetProperty("outcome").GetString() is Completed or Abandoned;
+                if (!finished) result.Add(Path.GetFileName(opRoot));
+            }
+
+            return result;
+        }
+
+        /// <summary>Every path the import will read, write or rely on, checked BEFORE the first write. Returns the first problem.</summary>
+        private string PathSafety(string root, Observation o, string opRoot, string staging)
+        {
+            foreach (var folder in new[] { Path.Combine(root, "crescendarr"), Path.GetDirectoryName(opRoot), opRoot, Path.GetDirectoryName(staging), staging })
+            {
+                if (!Disk.IsUnder(root, Path.GetFullPath(folder)) || Disk.HasLinkInChain(folder, root)) return "operation storage traverses a link or escapes the root: " + folder;
+            }
+
+            var artistRoot = o.Artist.Path.TrimEnd('/');
+            if (!Disk.IsUnder(root, artistRoot) || Disk.HasLinkInChain(artistRoot, root)) return "artist folder escapes the root or is reached through a link";
+            foreach (var decision in o.Decisions)
+            {
+                var path = Path.GetFullPath(decision.Item.Path);
+                if (!Disk.IsUnder(o.Folder, path) || !Disk.IsRegularFile(root, path)) return "download candidate is not a regular file inside the download folder: " + Path.GetFileName(path);
+            }
+
+            foreach (var file in o.TrackFiles.Values)
+            {
+                if (!Disk.IsUnder(artistRoot, file.Path) || !Disk.IsRegularFile(root, file.Path)) return "album audio is missing, outside the artist folder, or a link: " + Path.GetFileName(file.Path);
+            }
+
+            foreach (var lyric in o.AlbumLyrics)
+            {
+                var path = Path.Combine(artistRoot, lyric.RelativePath);
+                if (!Disk.IsUnder(artistRoot, Path.GetFullPath(path)) || !Disk.IsRegularFile(root, path)) return "registered lyric is missing or a link (dangling links included): " + lyric.RelativePath;
+            }
+
+            foreach (var decision in o.Plan.Decisions.Where(d => d.Action is MergeAction.Upgrade or MergeAction.AddMissing))
+            {
+                var stock = o.ByCandidate[decision.CandidateKey];
+                var destination = Destination(stock, o.Artist, o.Album);
+                if (!Disk.IsUnder(artistRoot, destination) || Disk.HasLinkInChain(Path.GetDirectoryName(destination), root)) return "destination escapes the artist folder or traverses a link: " + Path.GetFileName(destination);
+                var original = stock.Item.Tracks.Single().TrackFileId > 0 && o.TrackFiles.TryGetValue(stock.Item.Tracks.Single().TrackFileId, out var row) ? row.Path : null;
+                if (destination != original && Disk.Occupied(destination)) return "destination is occupied (a file, folder or dangling link): " + Path.GetFileName(destination);
+            }
+
+            return null;
+        }
+
+        private string Destination(ImportDecision<LocalTrack> stock, Artist artist, Album album) =>
+            Path.GetFullPath(_fileNames.BuildTrackFilePath(stock.Item.Tracks, artist, album,
+                new TrackFile { Path = stock.Item.Path, SceneName = stock.Item.SceneName }, Path.GetExtension(stock.Item.Path)));
+
+        private static LyricFile NewLyricRow(OperationContext context, int albumId, int trackFileId, string relativePath) => new LyricFile
+        {
+            ArtistId = context.Artist.Id, AlbumId = albumId, TrackFileId = trackFileId, RelativePath = relativePath,
+            Extension = Path.GetExtension(relativePath), Added = DateTime.UtcNow, LastUpdated = DateTime.UtcNow
+        };
+
+        private static string Results(List<ImportResult> results) => string.Join(",", results.Select(r => r.Result + ":" + string.Join("|", r.Errors)));
+
         // ------------------------------------------------------------------ observation for the reconciler
 
+        /// <summary>
+        /// Fresh host view. M18 P0-B: global sharers are re-queried on EVERY snapshot for the union of original IDs,
+        /// recorded fresh IDs, every bound track's CURRENT link, every album row and every row at a bound path. The
+        /// album query alone is never taken as complete. TrackFileId 0 is excluded (it is "unlinked", not a row).
+        /// </summary>
         private HostSnapshot HostSnapshot(OperationManifest manifest, int artistId)
         {
             try
@@ -557,46 +874,78 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var artist = _artists.GetArtist(artistId);
                 if (album.ArtistMetadataId != artist.ArtistMetadataId) throw new InvalidOperationException("album/artist mismatch");
                 var releases = _releases.GetReleasesByAlbum(b.AlbumId);
-                var tracks = _tracks.GetTracksByReleases(releases.Select(r => r.Id).ToList())
-                    .Concat(_trackRepository.GetTracksByFileId(b.Tracks.Select(t => t.OriginalTrackFileId)))
-                    .GroupBy(t => t.Id).Select(g => g.First()).ToList();
-                var files = _mediaFiles.GetFilesByAlbum(b.AlbumId).ToList();
-                foreach (var path in b.Tracks.SelectMany(t => new[] { t.OriginalPath, t.DestinationPath }))
-                {
-                    var atPath = _mediaFiles.GetFileWithPath(path);
-                    if (atPath != null) files.Add(atPath);
-                }
-
-                foreach (var id in tracks.Select(t => t.TrackFileId).Where(id => id > 0).Except(files.Select(f => f.Id)).ToList())
-                {
-                    var row = _mediaFiles.Get(id);
-                    if (row != null) files.Add(row);
-                }
+                var releaseTracks = _tracks.GetTracksByReleases(releases.Select(r => r.Id).ToList());
+                var bound = b.Tracks.Select(t => t.TrackId).Concat(b.Additions.Select(a => a.TrackId)).Concat(b.Kept.Select(k => k.TrackId)).ToHashSet();
+                var albumFiles = _mediaFiles.GetFilesByAlbum(b.AlbumId);
+                var paths = b.Tracks.SelectMany(t => new[] { t.OriginalPath, t.DestinationPath }).Concat(b.Additions.Select(a => a.DestinationPath)).Concat(b.Kept.Select(k => k.Path))
+                    .Distinct(StringComparer.Ordinal).ToList();
+                // The list overload returns zero or more rows; the single-path overload throws when no row exists.
+                var pathRows = _mediaFiles.GetFileWithPath(paths);
+                var ids = new HashSet<int>();
+                ids.UnionWith(b.Tracks.Select(t => t.OriginalTrackFileId));
+                ids.UnionWith(b.Kept.Select(k => k.TrackFileId));
+                ids.UnionWith(manifest.Progress.Where(p => p.NewTrackFileId != null).Select(p => p.NewTrackFileId.Value));
+                ids.UnionWith(manifest.Additions.Where(a => a.NewTrackFileId != null).Select(a => a.NewTrackFileId.Value));
+                ids.UnionWith(releaseTracks.Where(t => bound.Contains(t.Id)).Select(t => t.TrackFileId));
+                ids.UnionWith(albumFiles.Select(f => f.Id));
+                ids.UnionWith(pathRows.Select(f => f.Id));
+                ids.Remove(0);
+                var sharers = ids.Count == 0 ? new List<Track>() : _trackRepository.GetTracksByFileId(ids);
+                var tracks = releaseTracks.Concat(sharers).GroupBy(t => t.Id).Select(g => g.First()).ToList();
+                var lyrics = _lyrics.GetFilesByArtist(artist.Id);
+                var known = albumFiles.Concat(pathRows).Select(f => f.Id).ToHashSet();
+                var wanted = tracks.Select(t => t.TrackFileId).Concat(lyrics.Select(l => l.TrackFileId ?? 0)).Concat(ids).Where(id => id > 0 && !known.Contains(id)).Distinct().ToList();
+                var files = albumFiles.Concat(pathRows).Concat(wanted.Count == 0 ? new List<TrackFile>() : ExistingRows(wanted)).GroupBy(f => f.Id).Select(g => g.First()).ToList();
+                var foreign = sharers.Where(t => !releaseTracks.Any(r => r.Id == t.Id)).ToList();
+                if (foreign.Count > 0)
+                    CrescendarrGuard.Emit(_logger, $"SNAPSHOT_GLOBAL_SHARERS rows=[{string.Join(",", ids.OrderBy(i => i))}] foreignTracks=[{string.Join(",", foreign.Select(t => t.Id + "->" + t.TrackFileId))}]");
 
                 return new HostSnapshot(true, b.AlbumId,
                     releases.Select(r => new HostRelease(r.Id, r.ForeignReleaseId, r.Monitored)).ToImmutableArray(),
                     tracks.Select(t => new HostTrack(t.Id, t.ForeignRecordingId, t.TrackFileId)).ToImmutableArray(),
-                    files.GroupBy(f => f.Id).Select(g => new HostTrackFile(g.Key, g.First().Path)).ToImmutableArray(),
-                    _lyrics.GetFilesByArtist(artist.Id).Select(l => new HostLyric(l.Id, l.TrackFileId ?? 0, l.RelativePath)).ToImmutableArray(),
+                    files.Select(f => new HostTrackFile(f.Id, f.Path)).ToImmutableArray(),
+                    lyrics.Select(l => new HostLyric(l.Id, l.TrackFileId ?? 0, l.RelativePath)).ToImmutableArray(),
                     artist.Path.TrimEnd('/'));
             }
             catch (Exception error)
             {
-                CrescendarrGuard.Emit(_logger, "HOST_SNAPSHOT_FAILED " + error.GetType().Name);
+                CrescendarrGuard.Emit(_logger, "HOST_SNAPSHOT_FAILED " + error.GetType().Name + ": " + error.Message);
                 return new HostSnapshot(false, manifest.Binding.AlbumId, ImmutableArray<HostRelease>.Empty, ImmutableArray<HostTrack>.Empty,
                     ImmutableArray<HostTrackFile>.Empty, ImmutableArray<HostLyric>.Empty, null);
             }
         }
 
+        /// <summary>
+        /// Rows that exist among the IDs. Stock BasicRepository.Get(IEnumerable) throws unless EVERY ID exists, but deleted
+        /// originals and dangling links are exactly what the reconciler must see as absent.
+        /// </summary>
+        private List<TrackFile> ExistingRows(IEnumerable<int> ids)
+        {
+            var rows = new List<TrackFile>();
+            foreach (var id in ids.Where(i => i > 0).Distinct())
+            {
+                try
+                {
+                    rows.Add(_mediaFiles.Get(id));
+                }
+                catch (NzbDrone.Core.Datastore.ModelNotFoundException)
+                {
+                    // absent row: the reconciler decides what that means
+                }
+            }
+
+            return rows;
+        }
+
         private static FilesystemSnapshot Observe(string root, OperationManifest manifest)
         {
             var files = ImmutableDictionary.CreateBuilder<string, FileObservation>(StringComparer.Ordinal);
-            foreach (var path in manifest.Binding.Tracks.SelectMany(Reconciler.BoundPaths).Distinct(StringComparer.Ordinal))
+            foreach (var path in Reconciler.AllBoundPaths(manifest.Binding))
             {
                 var escapes = !Disk.IsUnder(root, path) || Disk.HasLinkInChain(path, root);
-                files[path] = File.Exists(path)
-                    ? new FileObservation(true, new FileInfo(path).Length, Disk.Sha(path), escapes)
-                    : FileObservation.Absent with { Escapes = escapes };
+                files[path] = File.Exists(path) && !escapes
+                    ? new FileObservation(true, new FileInfo(path).Length, Disk.Sha(path), false)
+                    : (Disk.Occupied(path) ? new FileObservation(true, null, null, escapes) : FileObservation.Absent with { Escapes = escapes });
             }
 
             return new FilesystemSnapshot(Directory.Exists(root), files.ToImmutable());
@@ -607,8 +956,10 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         private static void Save(string opRoot, OperationManifest manifest) =>
             Disk.WriteDurable(Path.Combine(opRoot, "journal.json"), JournalCodec.Encode(manifest), replace: true);
 
-        private static void CopyIfAbsent(string source, string destination, string sha)
+        private static void CopyIfAbsent(string root, string source, string destination, string sha)
         {
+            Disk.RequireConfined(root, source, "backup source");
+            Disk.RequireConfined(root, destination, "backup destination");
             if (File.Exists(destination))
             {
                 if (Disk.Sha(destination) != sha) throw new CommandFailedException("An existing backup has unexpected bytes.");
@@ -626,17 +977,6 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             bytes[6] = (byte)((bytes[6] & 0x0F) | 0x40);
             bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
             return new Guid(bytes, true).ToString("D");
-        }
-
-        /// <summary>Deterministic, test-owned fault point: pauses (so the harness can SIGKILL the daemon) only when armed.</summary>
-        private void FaultPoint(string root, string name)
-        {
-            var armed = Path.Combine(root, "faults", "pause-" + name);
-            if (!File.Exists(armed)) return;
-            Disk.WriteDurable(Path.Combine(root, "faults", "paused-" + name), "paused\n", replace: true);
-            CrescendarrGuard.Emit(_logger, "FAULT_PAUSED " + name);
-            var deadline = DateTime.UtcNow.AddMinutes(5);
-            while (!File.Exists(Path.Combine(root, "faults", "release-" + name)) && DateTime.UtcNow < deadline) Thread.Sleep(100);
         }
     }
 }

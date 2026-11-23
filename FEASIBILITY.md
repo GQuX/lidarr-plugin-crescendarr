@@ -1,3 +1,26 @@
+# M18 update (issue #48, draft PR #49): the importer's crash and recovery paths
+
+**Verdict.** M17's golden path is still PROVEN. On the real stock daemon, M18 also makes these safe:
+- the missing-track add;
+- the native post-move/pre-row crash window, for both an upgrade and an add;
+- album-wide lyric recovery after a destructive stock rescan, for the 3-track shapes;
+- detection of a foreign alias of a fresh row.
+
+A mid-album crash on a multi-upgrade album still ends in **sticky review**, not automatic recovery, with all lyric bytes preserved in verified backups. **Production write-enabled stays NO-GO.** Details are in [`docs/compatibility/native-post-move-crash-and-album-lyric-recovery.md`](docs/compatibility/native-post-move-crash-and-album-lyric-recovery.md).
+
+**What was exercised in the real daemon:**
+- **The post-move/pre-row window.** It was paused inside stock `ImportApprovedTracks.Import` through an additive `IManageExtraFiles` hook, which runs after the file move and before `AddMany`. A DB copy at the pause proves the file was moved, no row existed and the track was unlinked. The daemon was then SIGKILLed.
+- **The destructive album-wide rescan.** It ran as a real queued `RescanFolders` before recovery. It gave the unselected superior FLAC a fresh row and physically recycled its registered `.lrc`.
+
+**What changed:**
+- **One journal.** M13's journal (format v3) now covers additions, protected unselected tracks and every album lyric. There is no add outside the journal, and no operation is "complete" while an add is in flight.
+- **Restore and rebind.** Recycled album lyrics are restored from verified backups (never overwriting) and rebound to the **current** rows, only after all bound audio is linked.
+- **Global sharers.** They are re-queried on every snapshot for the union of original, recorded, current-link, album and path-resolved rows.
+- **Link safety.** Dangling symlinks are detected, and every path is confined before the first write.
+- **Operator states.** `review.json`, `downloadSettled=false`, an album block, and operator-approved registration of a placed file. The approved registration avoids the cascade entirely.
+
+---
+
 # M17 feasibility: one additive plugin, unmodified Lidarr, selective per-track import
 
 **Verdict for the defined vertical slice: PROVEN.** The full one-plugin, no-fork product is **not yet usable**: what remains is engineering (see the end), not a host blocker. **Production write-enabled stays NO-GO.**

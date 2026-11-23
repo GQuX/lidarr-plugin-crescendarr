@@ -26,7 +26,13 @@ public static class JournalEngine
         var progress = binding.Tracks
             .Select(t => new TrackProgress(t.TrackId, TrackPhase.Planned, null, 0, null, null))
             .ToImmutableArray();
-        return new OperationManifest(1, OperationStatus.Active, ImmutableArray<string>.Empty, binding, JournalCodec.BindingDigest(binding), progress);
+        var additions = binding.Additions
+            .Select(a => new AdditionProgress(a.TrackId, AdditionPhase.Planned, false, 0, null))
+            .ToImmutableArray();
+        return new OperationManifest(1, OperationStatus.Active, ImmutableArray<string>.Empty, binding, JournalCodec.BindingDigest(binding), progress)
+        {
+            Additions = additions,
+        };
     }
 
     public static TrackPhase FinalPhase(TrackBinding track) => track.Lyric is null ? TrackPhase.Upgraded : TrackPhase.LyricRelinked;
@@ -36,6 +42,53 @@ public static class JournalEngine
 
     public static bool IsFinal(OperationManifest manifest, int trackId) =>
         manifest.ProgressFor(trackId).Phase == FinalPhase(manifest.BindingFor(trackId));
+
+    /// <summary>Every replacement reached its final phase (additions only start after this).</summary>
+    public static bool AllUpgradesFinal(OperationManifest manifest) => manifest.Binding.Tracks.All(t => IsFinal(manifest, t.TrackId));
+
+    /// <summary>Every replacement final and every addition observed added: all bound album audio is linked.</summary>
+    public static bool AllAudioFinal(OperationManifest manifest) =>
+        AllUpgradesFinal(manifest) && manifest.Additions.All(a => a.Phase == AdditionPhase.Added) && !manifest.AnyInFlight;
+
+    /// <summary>The next addition that may be declared, or null. Additions run one at a time after every upgrade is final.</summary>
+    public static int? NextAddition(OperationManifest manifest)
+    {
+        if (manifest.Status != OperationStatus.Active || manifest.AnyInFlight || !AllUpgradesFinal(manifest)) return null;
+        return manifest.Additions.FirstOrDefault(a => a.Phase == AdditionPhase.Planned)?.TrackId;
+    }
+
+    public static OperationManifest MarkAdditionInFlight(OperationManifest manifest, int trackId)
+    {
+        RequireActive(manifest);
+        var progress = FindAddition(manifest, trackId);
+        if (manifest.AnyInFlight) throw new JournalTransitionException("Another step is already in flight.");
+        if (!AllUpgradesFinal(manifest)) throw new JournalTransitionException("Additions start only after every replacement is final.");
+        if (progress.Phase != AdditionPhase.Planned) throw new JournalTransitionException($"Addition {trackId} is already {progress.Phase}.");
+        return ReplaceAddition(manifest, progress with { InFlight = true });
+    }
+
+    public static OperationManifest MarkAdditionDone(OperationManifest manifest, int trackId, int? newTrackFileId)
+    {
+        RequireActive(manifest);
+        var progress = FindAddition(manifest, trackId);
+        if (!progress.InFlight) throw new JournalTransitionException($"Addition {trackId} was not declared in flight.");
+        if (newTrackFileId is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == newTrackFileId) ||
+            manifest.Binding.Kept.Any(k => k.TrackFileId == newTrackFileId))
+            throw new JournalTransitionException($"Addition {trackId}: must record a fresh, positive track-file ID.");
+        if (manifest.Progress.Any(p => p.NewTrackFileId == newTrackFileId) || manifest.Additions.Any(a => a.TrackId != trackId && a.NewTrackFileId == newTrackFileId))
+            throw new JournalTransitionException($"Addition {trackId}: track-file ID {newTrackFileId} is already recorded for another track.");
+        return ReplaceAddition(manifest, progress with { Phase = AdditionPhase.Added, InFlight = false, NewTrackFileId = newTrackFileId });
+    }
+
+    public static OperationManifest AbandonAddition(OperationManifest manifest, int trackId)
+    {
+        RequireActive(manifest);
+        var progress = FindAddition(manifest, trackId);
+        if (!progress.InFlight) throw new JournalTransitionException($"Addition {trackId} is not in flight.");
+        var attempts = progress.InterruptedAttempts + 1;
+        var cleared = ReplaceAddition(manifest, progress with { InFlight = false, InterruptedAttempts = attempts });
+        return attempts > MaxInterruptedAttempts ? MarkReview(cleared, $"Addition {trackId}: interrupted {attempts} times.") : cleared;
+    }
 
     /// <summary>Which step may be declared next for a track, or null when none.</summary>
     public static JournalStep? NextStep(OperationManifest manifest, int trackId)
@@ -59,6 +112,8 @@ public static class JournalEngine
         var progress = Find(manifest, trackId);
         if (manifest.InFlightTrack is { } busy)
             throw new JournalTransitionException($"Track {busy.TrackId} already has {busy.InFlight} in flight.");
+        if (manifest.InFlightAddition is { } adding)
+            throw new JournalTransitionException($"Addition {adding.TrackId} is in flight.");
         if (NextStep(manifest, trackId) != step)
             throw new JournalTransitionException($"Step {step} is not allowed for track {trackId} in phase {progress.Phase}.");
         return Replace(manifest, progress with { InFlight = step });
@@ -114,8 +169,9 @@ public static class JournalEngine
     public static OperationManifest Complete(OperationManifest manifest)
     {
         RequireActive(manifest);
-        if (manifest.InFlightTrack is not null) throw new JournalTransitionException("A step is still in flight.");
+        if (manifest.AnyInFlight) throw new JournalTransitionException("A step is still in flight.");
         if (!manifest.Binding.Tracks.All(t => IsFinal(manifest, t.TrackId))) throw new JournalTransitionException("Not every track reached its final phase.");
+        if (manifest.Additions.Any(a => a.Phase != AdditionPhase.Added)) throw new JournalTransitionException("Not every addition was observed added.");
         return manifest with { Generation = manifest.Generation + 1, Status = OperationStatus.Completed };
     }
 
@@ -123,9 +179,9 @@ public static class JournalEngine
     {
         // A fresh row is required: never reuse the deleted original row's numeric ID, nor any
         // other bound original ID.
-        if (id is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == id))
+        if (id is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == id) || manifest.Binding.Kept.Any(k => k.TrackFileId == id))
             throw new JournalTransitionException($"Track {track.TrackId}: upgrade must record a fresh, positive track-file ID.");
-        if (manifest.Progress.Any(p => p.TrackId != track.TrackId && p.NewTrackFileId == id))
+        if (manifest.Progress.Any(p => p.TrackId != track.TrackId && p.NewTrackFileId == id) || manifest.Additions.Any(a => a.NewTrackFileId == id))
             throw new JournalTransitionException($"Track {track.TrackId}: track-file ID {id} is already recorded for another track.");
         return id.Value;
     }
@@ -145,6 +201,15 @@ public static class JournalEngine
 
     private static TrackProgress Find(OperationManifest manifest, int trackId) =>
         manifest.Progress.SingleOrDefault(p => p.TrackId == trackId) ?? throw new JournalTransitionException($"Track {trackId} is not bound.");
+
+    private static AdditionProgress FindAddition(OperationManifest manifest, int trackId) =>
+        manifest.Additions.SingleOrDefault(a => a.TrackId == trackId) ?? throw new JournalTransitionException($"Addition {trackId} is not bound.");
+
+    private static OperationManifest ReplaceAddition(OperationManifest manifest, AdditionProgress progress) => manifest with
+    {
+        Generation = manifest.Generation + 1,
+        Additions = manifest.Additions.Select(a => a.TrackId == progress.TrackId ? progress : a).ToImmutableArray(),
+    };
 
     private static OperationManifest Replace(OperationManifest manifest, TrackProgress progress) => manifest with
     {
