@@ -91,6 +91,10 @@ jobs:
           python3 tools/package_lidarr_native.py "${RUNNER_TEMP}/audit-a/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate"
           python3 tools/package_lidarr_native.py "${RUNNER_TEMP}/audit-b/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate-again"
           cmp "${RUNNER_TEMP}/candidate/Crescendarr-v0.25.0-audit-beta.1.net8.0.zip" "${RUNNER_TEMP}/candidate-again/Crescendarr-v0.25.0-audit-beta.1.net8.0.zip"
+          # Positive/negative flavor controls. The native packager must independently refuse a writer DLL.
+          if python3 tools/package_lidarr_native.py "${RUNNER_TEMP}/writer/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/must-reject"; then
+            echo "A WRITE-ENABLED DLL passed native plugin packaging; unsafe" >&2; exit 1
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import hashlib, zipfile
