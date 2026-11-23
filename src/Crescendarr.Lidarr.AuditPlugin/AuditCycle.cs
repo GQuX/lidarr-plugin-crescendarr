@@ -146,7 +146,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var observation = _adapter.Observe(item, clientId, folder);
             var libraryProblem = LibraryProblem(observation);
             var disposition = libraryProblem != null ? "LibraryUnavailable" : observation.Blocked != null ? "Blocked" : observation.Plan?.Disposition.ToString() ?? "Blocked";
-            var blocked = libraryProblem ?? observation.Blocked;
+            var blocked = libraryProblem ?? observation.Blocked ?? ReviewReason(observation);
             var evaluation = DownloadRegistryPolicy.Evaluation(disposition, observation.Plan?.PlanId, blocked);
             var current = new SourceIdentity(clientId, item.DownloadId, folder, Digest(observation.IncomingSha));
             var previous = Read(state, folder);
@@ -260,6 +260,18 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             }
 
             return result;
+        }
+
+        /// <summary>Why a plan is not importable as-is: the planner's reason codes and stock's own rejections, never silent.</summary>
+        private static string ReviewReason(Observation o)
+        {
+            if (o.Plan == null || o.Plan.Disposition is PlanDisposition.Ready or PlanDisposition.NoImprovement) return null;
+            var codes = o.Plan.Decisions.Where(d => d.Action == MergeAction.NeedsReview).Select(d => d.ReasonCode).Distinct(StringComparer.Ordinal).ToList();
+            var stock = o.Decisions.Where(d => !d.Approved).SelectMany(d => d.Rejections.Select(r => r.Reason)).Distinct(StringComparer.Ordinal).Take(3).ToList();
+            var parts = new List<string>();
+            if (codes.Count > 0) parts.Add("planner: " + string.Join(", ", codes));
+            if (stock.Count > 0) parts.Add("Lidarr: " + string.Join("; ", stock));
+            return parts.Count == 0 ? $"plan disposition {o.Plan.Disposition}" : string.Join(" | ", parts);
         }
 
         private static bool Same(string a, string b) => Guid.TryParse(a, out var x) && Guid.TryParse(b, out var y) && x == y && x != Guid.Empty;

@@ -144,6 +144,19 @@ def run_cycle(host: Host) -> str:
     return found[-1]
 
 
+def wait_preview(host: Host, lane: Lane, name: str, wanted, what: str, deadline: float = 240) -> dict:
+    """Stock blackhole reports a folder Completed only after its grace period (again after every restart)."""
+    limit = time.monotonic() + deadline
+    entry = None
+    while time.monotonic() < limit:
+        run_cycle(host)
+        entry = report(lane).get(name)
+        if entry is not None and wanted(entry):
+            return entry
+        time.sleep(10)
+    raise Failure(f"{what} (last report entry: {json.dumps(entry)[:600] if entry else None})")
+
+
 def report(lane: Lane) -> dict:
     data = json.loads((state_dir(lane) / "report.json").read_text())
     by_folder = {d["folder"]: d for d in data["downloads"]}
@@ -261,8 +274,7 @@ def lane_readonly(lane: Lane) -> None:
         host = boot(lane)
 
         # 5. Restart and a quality-profile change: the preview updates, the library does not.
-        run_cycle(host)
-        check(report(lane)[GOOD]["state"] == "WouldImport", "after restart the preview is unchanged")
+        wait_preview(host, lane, GOOD, lambda e: e["state"] == "WouldImport", "after restart the preview is unchanged")
         original = host.api("GET", f"qualityprofile/{host.api('GET', 'artist')[0]['qualityProfileId']}")
         profile = json.loads(json.dumps(original))
         items = profile["items"]
@@ -379,9 +391,7 @@ def lane_lifecycle(lane: Lane, packages: Path) -> None:
         client = host.api("GET", "downloadclient")[0]
         connect(host, 1, [client["id"]], str(lane.watch))
         shutil.move(str(lane.base / "prepared" / GOOD), str(lane.watch / GOOD))
-        time.sleep(35)
-        run_cycle(host)
-        check(report(lane)[GOOD]["state"] == "WouldImport", f"{v1}: previews the download")
+        wait_preview(host, lane, GOOD, lambda e: e["state"] == "WouldImport", f"{v1}: previews the download")
         records = sorted(p.name for p in (state_dir(lane) / "downloads").glob("*.json"))
     finally:
         host.stop()
@@ -393,7 +403,7 @@ def lane_lifecycle(lane: Lane, packages: Path) -> None:
         check(v2 != v1, f"upgraded build identity is visible ({v1} -> {v2})")
         check(any(n["implementation"] == "CrescendarrAuditConnect" and next(f["value"] for f in n["fields"] if f["name"] == "mode") == 1
                   for n in host.api("GET", "notification")), "upgrade: settings preserved")
-        run_cycle(host)
+        wait_preview(host, lane, GOOD, lambda e: e["state"] == "WouldImport", "upgrade: the preview works")
         check(sorted(p.name for p in (state_dir(lane) / "downloads").glob("*.json")) == records, "upgrade: registry state reused, not duplicated")
     finally:
         host.stop()
@@ -402,8 +412,7 @@ def lane_lifecycle(lane: Lane, packages: Path) -> None:
     host = boot(lane)
     try:
         check(version(host) == v1, "rollback: the previous build runs again")
-        run_cycle(host)
-        check(report(lane)[GOOD]["state"] == "WouldImport", "rollback: the preview still works on the newer state")
+        wait_preview(host, lane, GOOD, lambda e: e["state"] == "WouldImport", "rollback: the preview still works on the newer state")
         connect_id = [n for n in host.api("GET", "notification") if n["implementation"] == "CrescendarrAuditConnect"][0]["id"]
         host.api("DELETE", f"notification/{connect_id}")
         note("UNINSTALL step 1: Connect definition removed through the stock API")
