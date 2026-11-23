@@ -77,9 +77,10 @@ class CifsShare:
                        text=True, check=True, capture_output=True)
 
     def start_server(self) -> None:
-        log = (self.state / "smbd.stdout").open("a")
-        self.process = subprocess.Popen(["sudo", "-n", "smbd", "--foreground", "--no-process-group", "--debug-stdout", "-s", str(self.conf)],
-                                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        # Daemon mode (not a foreground child of sudo: Ubuntu 24.04 sudo with use_pty terminates detached children).
+        result = sudo("smbd", "-D", "-s", str(self.conf), check=False)
+        (self.state / "smbd.stdout").write_text(result.stdout + result.stderr)
+        self.process = None
         limit = time.monotonic() + 30
         while time.monotonic() < limit:
             if subprocess.run(["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/445"], capture_output=True).returncode == 0:
@@ -87,11 +88,11 @@ class CifsShare:
             time.sleep(0.3)
         output = (self.state / "smbd.stdout").read_text(errors="replace")[-4000:]
         logs = sudo("bash", "-c", f"tail -c 3000 {self.state / 'log'}/*.log 2>&1; ls -la {self.state}/*", check=False).stdout[-5000:]
-        raise RuntimeError(f"smbd did not listen on 127.0.0.1:445 (exit={self.process.poll()})"
+        raise RuntimeError(f"smbd did not listen on 127.0.0.1:445 (pids={self.server_pids()})"
                            f"\n--- smbd output ---\n{output}\n--- smbd log ---\n{logs}")
 
     def server_pids(self) -> list[int]:
-        out = subprocess.run(["pgrep", "-f", f"smbd.*{self.conf}"], capture_output=True, text=True).stdout.split()
+        out = subprocess.run(["pgrep", "-f", f"smbd -D -s {self.conf}"], capture_output=True, text=True).stdout.split()
         return [int(p) for p in out]
 
     def signal_server(self, sig: signal.Signals) -> None:
@@ -100,11 +101,9 @@ class CifsShare:
 
     def kill_server(self) -> None:
         self.signal_server(signal.SIGKILL)
-        if self.process:
-            try:
-                self.process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                pass
+        limit = time.monotonic() + 15
+        while self.server_pids() and time.monotonic() < limit:
+            time.sleep(0.2)
 
     # ------------------------------------------------------------------ client
     def mount(self, read_only: bool = False) -> None:
