@@ -388,6 +388,11 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         public static void CopyVerified(string source, string destination, string expectedSha)
         {
             using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
+            // Preserve the original preflight guarantee: a mismatched source must not even create destination directories
+            // (particularly important when the destination is a library lyric path on CIFS).
+            var beforeSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input)).ToLowerInvariant();
+            if (beforeSha != expectedSha) throw new CrescendarrGuardException($"Source changed before copy: {source}");
+            input.Position = 0;
             using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
             var buffer = new byte[64 * 1024];
             WriteAtomically(destination, replace: false, writer: output =>
