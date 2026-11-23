@@ -102,26 +102,36 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             _logger = logger;
         }
 
-        /// <summary>Completed items of the synthetic stock Usenet Blackhole client, read through the stock client API.</summary>
+        /// <summary>
+        /// Completed items of every download-handling-enabled stock client explicitly named "Crescendarr Synthetic ..."
+        /// (M17 blackhole; M21 any client type, e.g. SABnzbd), read ONLY through Lidarr's own client factory and client
+        /// implementation (no direct downloader API). Every reported output folder must lie in the disposable downloads
+        /// folder and contain no link. Unrecognized client names are never touched.
+        /// </summary>
         public List<(DownloadClientItem Item, int ClientId, string WatchFolder)> CompletedItems(string root, out List<string> notes)
         {
             notes = new List<string>();
             var result = new List<(DownloadClientItem, int, string)>();
+            var downloads = Path.Combine(root, "downloads");
             foreach (var client in _clients.DownloadHandlingEnabled())
             {
-                if (client is not UsenetBlackhole || client.Definition.Name != CrescendarrGuard.ClientName ||
-                    client.Definition.Settings is not UsenetBlackholeSettings settings)
-                    continue;
-                var watch = Path.GetFullPath(settings.WatchFolder).TrimEnd('/');
-                if (!Disk.IsUnder(root, watch)) throw new CrescendarrGuardException("Synthetic client watch folder is outside the disposable root.");
+                if (client.Definition.Name == null || !client.Definition.Name.StartsWith(CrescendarrGuard.ClientNamePrefix, StringComparison.Ordinal)) continue;
+                var confine = downloads;
+                if (client is UsenetBlackhole)
+                {
+                    if (client.Definition.Settings is not UsenetBlackholeSettings settings) continue;
+                    confine = Path.GetFullPath(settings.WatchFolder).TrimEnd('/');
+                    if (!Disk.IsUnder(root, confine)) throw new CrescendarrGuardException("Synthetic client watch folder is outside the disposable root.");
+                }
+
                 foreach (var item in client.GetItems())
                 {
-                    notes.Add($"{item.DownloadId}:{item.Status}");
-                    if (item.Status != DownloadItemStatus.Completed) continue;
+                    notes.Add($"{client.Definition.Implementation}:{item.DownloadId}:{item.Status}");
+                    if (item.Status != DownloadItemStatus.Completed || item.OutputPath.IsEmpty) continue;
                     var output = Path.GetFullPath(item.OutputPath.FullPath).TrimEnd('/');
-                    if (!Disk.IsUnder(watch, output) || Disk.HasLinkInChain(output, root))
-                        throw new CrescendarrGuardException("Completed item escapes the watch folder or traverses a link.");
-                    result.Add((item, client.Definition.Id, watch));
+                    if (!Disk.IsUnder(confine, output) || Disk.HasLinkInChain(output, root))
+                        throw new CrescendarrGuardException("Completed item escapes the disposable downloads folder or traverses a link.");
+                    result.Add((item, client.Definition.Id, confine));
                 }
             }
 
