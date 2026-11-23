@@ -909,7 +909,21 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var manifest = context.Manifest;
                 // M23: never touch unavailable storage while describing it (a frozen SMB server would block the summary).
                 var storageDown = outcome == StorageUnavailable;
-                string Sha(string path) => storageDown || path == null ? null : Disk.IsRegularFile(context.Root, path) ? Disk.Sha(path) : null;
+                // The review report references several backup paths twice. Hash each distinct path only once within
+                // this read-only diagnostic snapshot, without re-reading a large FLAC or an unavailable SMB mount.
+                var observedHashes = new Dictionary<string, string>(StringComparer.Ordinal);
+                string Sha(string path)
+                {
+                    if (storageDown || path == null) return null;
+                    if (!observedHashes.TryGetValue(path, out var value))
+                    {
+                        value = Disk.IsRegularFile(context.Root, path) ? Disk.Sha(path) : null;
+                        observedHashes[path] = value;
+                    }
+
+                    return value;
+                }
+
                 Track Fresh(int id)
                 {
                     try { return _tracks.GetTrack(id); }
@@ -1173,9 +1187,10 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 }
             }
 
-            if (Disk.Probe(manifest.Binding.ArtistRoot) != Disk.PathState.Directory)
+            var artistState = Disk.Probe(manifest.Binding.ArtistRoot);
+            if (artistState != Disk.PathState.Directory)
             {
-                context.StorageProblem = $"artist folder is not reachable as a directory ({Disk.Probe(manifest.Binding.ArtistRoot)})";
+                context.StorageProblem = $"artist folder is not reachable as a directory ({artistState})";
                 return new FilesystemSnapshot(false, files.ToImmutable());
             }
 

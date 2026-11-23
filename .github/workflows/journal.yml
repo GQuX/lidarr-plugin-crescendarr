@@ -10,6 +10,8 @@ on:
       - 'src/Crescendarr.Core/**'
       - 'src/Crescendarr.RecoveryLab/**'
       - 'tests/Crescendarr.Journal.Spec/**'
+      - 'tests/Crescendarr.Plugin.Disk.Spec/**'
+      - 'src/Crescendarr.Lidarr.Plugin/Disk.cs'
       - 'Directory.Build.props'
       - 'global.json'
       - '.github/workflows/journal.yml'
@@ -18,6 +20,8 @@ on:
       - 'src/Crescendarr.Core/**'
       - 'src/Crescendarr.RecoveryLab/**'
       - 'tests/Crescendarr.Journal.Spec/**'
+      - 'tests/Crescendarr.Plugin.Disk.Spec/**'
+      - 'src/Crescendarr.Lidarr.Plugin/Disk.cs'
       - 'Directory.Build.props'
       - 'global.json'
       - '.github/workflows/journal.yml'
@@ -60,6 +64,8 @@ jobs:
         env:
           CRESCENDARR_RECOVERY_LAB: DISPOSABLE_LOCAL_ONLY
         run: dotnet run --project tests/Crescendarr.Journal.Spec/Crescendarr.Journal.Spec.csproj --configuration Release
+      - name: Plugin filesystem primitives (verified copy, atomic write, streaming hash)
+        run: dotnet run --project tests/Crescendarr.Plugin.Disk.Spec/Crescendarr.Plugin.Disk.Spec.csproj --configuration Release
       - name: Planner and inventory specs still pass against the same core build
         run: |
           dotnet run --project tests/Crescendarr.Core.Spec/Crescendarr.Core.Spec.csproj --configuration Release

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Host-independent specs for the plugin's filesystem primitives (verified copy, atomic write, streaming hash).
+       Compiles the plugin's Disk.cs directly; no Lidarr assembly is referenced. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1031;CA1303;CA1305;CA1307;CA1310;CA1822;CA1849;CA2201;CA5394</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Crescendarr.Lidarr.Plugin/Disk.cs" Link="Plugin/Disk.cs" />
+  </ItemGroup>
+</Project>
