@@ -22,7 +22,8 @@ permissions:
   contents: read
 
 env:
-  LIDARR_IMAGE: lscr.io/linuxserver/lidarr:3.1.6.5079-ls49
+  # 3.1.6.5079-ls49, pinned by the digest recorded in run 45261466845 (tags can be re-pushed; digests cannot).
+  LIDARR_IMAGE: lscr.io/linuxserver/lidarr@sha256:8fb40ada166dd1880cb1b166df5bcbb081107523f20ab60df05c313e2052a467
   SABNZBD_VERSION: '5.1.3'
   SABNZBD_SHA256: '12a01e30ce166297a375ffc3a761f98bf7d93260e040391497f643f8a3525fed'
 
@@ -41,7 +42,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull "$LIDARR_IMAGE" >/dev/null
+          for attempt in 1 2 3 4 5; do docker pull "$LIDARR_IMAGE" >/dev/null && break; echo "pull attempt $attempt failed (registry rate limit?)"; sleep $((attempt * 30)); done
+          docker image inspect "$LIDARR_IMAGE" >/dev/null
           {
             echo "image: $LIDARR_IMAGE"
             echo "digest: $(docker image inspect --format '{{index .RepoDigests 0}}' "$LIDARR_IMAGE")"
