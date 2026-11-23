@@ -110,7 +110,7 @@ class Lane:
 def prepare(bin_dir: Path, plugin: Path, seeder: Path, base: Path, fixture: str) -> Lane:
     data, home = base / "config", base / "home"
     for d in (data, home, base / "library", base / "downloads" / "nzb", base / "downloads" / "watch", base / "recycle", base / "faults"):
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=d.name == "library")  # M23: the library may already be a mountpoint
     (base / ".crescendarr-disposable-host").write_text("CRESCENDARR_DISPOSABLE_HOST_V1\n", encoding="utf-8")
     seeder_dir = install(seeder, data, "CrescendarrFixtureSeeder")
     boot0 = Host(bin_dir, data, environment(base, home, crescendarr=False, seeder=True), base / "boot0.log")
