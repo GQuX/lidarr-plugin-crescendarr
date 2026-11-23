@@ -86,7 +86,7 @@ class CifsShare:
                 return
             time.sleep(0.3)
         output = (self.state / "smbd.stdout").read_text(errors="replace")[-4000:]
-        logs = "".join(p.read_text(errors="replace")[-3000:] for p in (self.state / "log").glob("*"))
+        logs = sudo("bash", "-c", f"tail -c 3000 {self.state / 'log'}/*.log 2>&1; ls -la {self.state}/*", check=False).stdout[-5000:]
         raise RuntimeError(f"smbd did not listen on 127.0.0.1:445 (exit={self.process.poll()})"
                            f"\n--- smbd output ---\n{output}\n--- smbd log ---\n{logs}")
 
