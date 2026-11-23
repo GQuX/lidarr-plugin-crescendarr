@@ -103,6 +103,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         {
             var armed = Path.Combine(root, "faults", "pause-" + name);
             if (!File.Exists(armed)) return;
+
+            // One-shot: consume the arm so a restarted process (whose native-call counter restarts) never pauses again.
+            File.Delete(armed);
             Disk.WriteDurable(Path.Combine(root, "faults", "paused-" + name), "paused\n", replace: true);
             CrescendarrGuard.Emit(logger, "FAULT_PAUSED " + name);
             var deadline = DateTime.UtcNow.AddMinutes(5);
