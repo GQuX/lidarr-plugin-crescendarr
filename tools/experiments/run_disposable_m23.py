@@ -66,6 +66,7 @@ def lane_baseline(lane: Lane, upgrades: list[int], superior: int, added: list[in
         final = verify_consistent(lane, "after-cifs-import", upgrades, superior, added)
         recycled = [p.name for p in (lane.base / "recycle").rglob("*") if p.is_file()]
         check(not any(x.endswith(".lrc") for x in recycled), "no lyric was recycled")
+        diagnose_known_filter(lane)
         scan = host.command({"name": "RescanFolders"})
         rescanned = lane.view("after-rescan")
         print_view("AFTER_RESCAN", rescanned)
@@ -76,6 +77,25 @@ def lane_baseline(lane: Lane, upgrades: list[int], superior: int, added: list[in
         host = replay_and_restart(lane, host, final, "after-replay")
     finally:
         host.stop()
+
+
+def diagnose_known_filter(lane: Lane) -> None:
+    """Exactly what stock FilterUnchangedFiles compares: disk length vs TrackFiles.Size, disk mtime vs TrackFiles.Modified."""
+    import sqlite3
+    m17.db_state(lane.data, "known-filter", lane.base)
+    con = sqlite3.connect(lane.base / "db" / "known-filter" / "lidarr.db")
+    try:
+        rows = con.execute('SELECT "Id","Path","Size","Modified","DateAdded" FROM "TrackFiles" ORDER BY "Id"').fetchall()
+    finally:
+        con.close()
+    on_disk = {str(p): p for p in lane.artist_path.rglob("*") if p.is_file()}
+    for rid, path, size, modified, added in rows:
+        p = Path(path)
+        st = p.stat() if p.exists() else None
+        note(f"KNOWN_FILTER row={rid} file={p.name} dbSize={size} diskSize={st.st_size if st else None} dbModified={modified} "
+             f"diskMtime={time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(st.st_mtime)) + f'.{int(st.st_mtime % 1 * 1e6):06d}Z' if st else None} "
+             f"listed={path in on_disk}")
+    note(f"KNOWN_FILTER disk_files={sorted(p.name for p in on_disk.values())}")
 
 
 def lane_sigkill_rescan(lane: Lane) -> None:
