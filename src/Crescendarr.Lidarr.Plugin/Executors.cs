@@ -721,7 +721,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 object Observed(int trackId, string expectedPath)
                 {
                     var track = Fresh(trackId);
-                    var row = track == null || track.TrackFileId <= 0 ? null : _mediaFiles.Get(new[] { track.TrackFileId }).FirstOrDefault();
+                    var row = track == null || track.TrackFileId <= 0 ? null : ExistingRows(new[] { track.TrackFileId }).FirstOrDefault();
                     return new
                     {
                         releaseTrackMbid = track?.ForeignTrackId, recordingMbid = track?.ForeignRecordingId, albumReleaseId = track?.AlbumReleaseId,
@@ -895,7 +895,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var lyrics = _lyrics.GetFilesByArtist(artist.Id);
                 var known = albumFiles.Concat(pathRows).Select(f => f.Id).ToHashSet();
                 var wanted = tracks.Select(t => t.TrackFileId).Concat(lyrics.Select(l => l.TrackFileId ?? 0)).Concat(ids).Where(id => id > 0 && !known.Contains(id)).Distinct().ToList();
-                var files = albumFiles.Concat(pathRows).Concat(wanted.Count == 0 ? new List<TrackFile>() : _mediaFiles.Get(wanted)).GroupBy(f => f.Id).Select(g => g.First()).ToList();
+                var files = albumFiles.Concat(pathRows).Concat(wanted.Count == 0 ? new List<TrackFile>() : ExistingRows(wanted)).GroupBy(f => f.Id).Select(g => g.First()).ToList();
                 var foreign = sharers.Where(t => !releaseTracks.Any(r => r.Id == t.Id)).ToList();
                 if (foreign.Count > 0)
                     CrescendarrGuard.Emit(_logger, $"SNAPSHOT_GLOBAL_SHARERS rows=[{string.Join(",", ids.OrderBy(i => i))}] foreignTracks=[{string.Join(",", foreign.Select(t => t.Id + "->" + t.TrackFileId))}]");
@@ -913,6 +913,28 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 return new HostSnapshot(false, manifest.Binding.AlbumId, ImmutableArray<HostRelease>.Empty, ImmutableArray<HostTrack>.Empty,
                     ImmutableArray<HostTrackFile>.Empty, ImmutableArray<HostLyric>.Empty, null);
             }
+        }
+
+        /// <summary>
+        /// Rows that exist among the IDs. Stock BasicRepository.Get(IEnumerable) throws unless EVERY ID exists, but deleted
+        /// originals and dangling links are exactly what the reconciler must see as absent.
+        /// </summary>
+        private List<TrackFile> ExistingRows(IEnumerable<int> ids)
+        {
+            var rows = new List<TrackFile>();
+            foreach (var id in ids.Where(i => i > 0).Distinct())
+            {
+                try
+                {
+                    rows.Add(_mediaFiles.Get(id));
+                }
+                catch (NzbDrone.Core.Datastore.ModelNotFoundException)
+                {
+                    // absent row: the reconciler decides what that means
+                }
+            }
+
+            return rows;
         }
 
         private static FilesystemSnapshot Observe(string root, OperationManifest manifest)
