@@ -150,6 +150,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
                 if (!tag.IsValid || tag.Quality?.Quality != (superior ? Quality.FLAC : Quality.MP3_192)) throw new CommandFailedException($"Owned fixture track {i + 1} unreadable.");
                 firstOwned ??= path;
                 var info = new FileInfo(path);
+                info.LastWriteTimeUtc = StableMtime(info);
                 var file = new TrackFile
                 {
                     Path = path, AlbumId = album.Id, Size = info.Length, Modified = info.LastWriteTimeUtc, DateAdded = DateTime.UtcNow,

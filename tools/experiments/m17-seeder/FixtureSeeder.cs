@@ -199,6 +199,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
                     throw new CommandFailedException($"Synthetic owned track {i} unreadable by stock AudioTag.");
 
                 var info = new FileInfo(path);
+                info.LastWriteTimeUtc = StableMtime(info);
                 var file = new TrackFile
                 {
                     Path = path, AlbumId = album.Id, Size = info.Length, Modified = info.LastWriteTimeUtc, DateAdded = DateTime.UtcNow,
@@ -315,6 +316,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             }.Write(path);
             var tag = new AudioTag(path);
             var info = new FileInfo(path);
+                info.LastWriteTimeUtc = StableMtime(info);
             var shared = new TrackFile
             {
                 Path = path, AlbumId = album.Id, Size = info.Length, Modified = info.LastWriteTimeUtc, DateAdded = DateTime.UtcNow,
@@ -331,6 +333,19 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
                 sharedPath = path, sharedSha = Sha(path), danglingTrackFileId = DanglingTrackFileId,
                 tracks = tracks.Select(t => new { n = t.AbsoluteTrackNumber, trackId = t.Id, trackFileId = t.TrackFileId }).ToList()
             };
+        }
+
+        /// <summary>
+        /// M23: pin each owned file's mtime explicitly (whole seconds, in the past) and record exactly that value. On a CIFS
+        /// library the client's attribute cache can report an mtime right after a write that the server later moves by
+        /// more than stock's 1 s "unchanged file" tolerance, which made a fixture row look stale to the next stock rescan.
+        /// </summary>
+        private static DateTime StableMtime(FileInfo info)
+        {
+            var pinned = new DateTime(2025, 1, 1, 12, 0, 0, DateTimeKind.Utc).AddSeconds(info.Name.Length);
+            File.SetLastWriteTimeUtc(info.FullName, pinned);
+            info.Refresh();
+            return pinned;
         }
 
         private static string RequireRoot()
