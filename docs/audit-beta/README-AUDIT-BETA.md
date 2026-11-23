@@ -58,7 +58,7 @@ Lidarr will download the compatible `net8.0.zip` release asset to its plugin fol
    ```
 
 2. Stop Lidarr.
-3. Unzip **only** `Lidarr.Plugin.Crescendarr.dll` into `<Lidarr AppData>/plugins/GQuX/Crescendarr/`. In Docker, AppData is usually `/config`.
+3. Unzip **only** `Lidarr.Plugin.Crescendarr.dll` into `<Lidarr AppData>/plugins/GQuX/lidarr-plugin-crescendarr/`. In Docker, AppData is usually `/config`. Use exactly this folder: it is the one Lidarr's own installer and **Uninstall** button use. If an earlier test left a copy in `plugins/GQuX/Crescendarr/`, delete that folder first, or Lidarr loads the plugin twice.
 4. Check that the DLL matches the `SHA256SUMS` file inside the zip:
 
    ```sh
@@ -96,7 +96,7 @@ Installing changes nothing. Crescendarr does nothing until you configure it.
 - **Uninstall**:
   1. Delete the Crescendarr entry in Settings > Connect.
   2. Stop Lidarr.
-  3. Delete `<AppData>/plugins/GQuX/Crescendarr/`.
+  3. Delete `<AppData>/plugins/GQuX/lidarr-plugin-crescendarr/`, or use System > Plugins > Uninstall, which deletes the same folder.
   4. Start Lidarr.
   5. Optionally delete `<AppData>/crescendarr-audit/` to remove all audit data.
 

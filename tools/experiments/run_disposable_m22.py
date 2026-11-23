@@ -171,7 +171,9 @@ priority = 0
                 self.states.append((time.strftime("%H:%M:%S"), nzo, state))
                 note(f"SAB_STATE nzo={nzo} state={state}")
                 last = state
-            if state in wanted:
+            # Real SABnzbd can publish a history slot as Completed a moment BEFORE it fills in "storage" (seen as
+            # storage='' -> Path('.') in the long-unexplained M22 restart-lane flake). Wait for the finished slot.
+            if state in wanted and not (state == "Completed" and not (slot or {}).get("storage")):
                 return slot
             time.sleep(0.4)
         raise Failure(f"SAB job {nzo} never reached {wanted} (last {last})")

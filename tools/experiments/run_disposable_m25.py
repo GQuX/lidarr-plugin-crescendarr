@@ -358,8 +358,8 @@ def lane_lifecycle(lane: Lane, packages: Path) -> None:
     zips = sorted(packages.glob("crescendarr-audit-beta-*.zip"))
     check(len(zips) == 2, f"two candidate packages to install and upgrade ({[z.name for z in zips]})")
     first, second = zips
-    plugin_dir = lane.data / "plugins" / "GQuX" / "Crescendarr"
-    shutil.rmtree(plugin_dir)
+    shutil.rmtree(lane.data / "plugins" / "GQuX" / "Crescendarr")  # the harness seeding folder
+    plugin_dir = lane.data / "plugins" / "GQuX" / "lidarr-plugin-crescendarr"  # the documented manual / native folder
 
     host = boot(lane, marker="")  # stock only
     try:

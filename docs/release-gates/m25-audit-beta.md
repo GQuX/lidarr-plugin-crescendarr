@@ -57,7 +57,7 @@ The importer, recovery, salvage, operator approval and every writer command are 
 | 6 | Install, upgrade, rollback, uninstall | **PROVEN** | `package-lifecycle`: installs from the zip (DLL checked against `SHA256SUMS`), upgrades to `audit-beta.2` (settings and registry kept), rolls back, then uninstalls (Connect removed, plugin folder removed, stock settings equal to before install, library unchanged throughout). |
 | 6 | State and registry migration | **PROVEN** (registry reused across upgrade and rollback). The writer-to-audit switch on one host is **NOT TESTED**: the two use separate state folders. | |
 | 6 | Screenshots of the Connect UI | **NOT TESTED** (described in README) | |
-| 7 | M22 SABnzbd restart-path flake | **STILL UNEXPLAINED** | M22 doc |
+| 7 | M22 SABnzbd restart-path flake | **ROOT-CAUSED in M27** (harness race on SABnzbd's not-yet-filled `storage`; fixed in the harness) | M22 doc |
 | 7 | M23 stock CIFS timestamp/rescan limitation | **OPEN (stock behaviour)** | M23 doc, README limitations |
 | 7 | Non-MP3 payload integrity | **WRITE-ENABLED BLOCKER** (audit build only reports) | |
 | 7 | Physical power loss | **WRITE-ENABLED BLOCKER, NOT TESTED** | |
