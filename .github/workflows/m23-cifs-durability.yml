@@ -1,0 +1,91 @@
+name: M23 kernel CIFS (SMB 3.1.1) durability (disposable)
+
+# M23 (#58) EXPERIMENTAL, TEST ONLY. A disposable Samba server bound to 127.0.0.1 with a random per-run account,
+# mounted by the REAL Linux kernel CIFS client (mount -t cifs, vers=3.1.1) as the library of the official
+# SHA-256-pinned Lidarr v3.1.6.5079 daemon with ONE Crescendarr plugin. No NAS, real SMB account or media.
+# Simulated failures are process signals and unmounts; this is NOT a power-loss test.
+on:
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Lidarr.Plugin/**'
+      - 'src/Crescendarr.Core/**'
+      - 'tools/experiments/**'
+      - '.github/workflows/m23-cifs-durability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cifs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [cifs-three, cifs-twelve, cifs-sigkill-rescan, cifs-server-loss, cifs-unmounted, cifs-readonly]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$archive" \
+            "https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz"
+          printf '%s  %s\n' 'fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc' "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/crescendarr-clean-host"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/crescendarr-clean-host"
+          bin="$(dirname "$(find "${RUNNER_TEMP}/crescendarr-clean-host" -type f -name Lidarr.Core.dll -print -quit)")"
+          test -f "$bin/Lidarr"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: Install Samba and the kernel CIFS client (Ubuntu 24.04 archive); verify the cifs module loads
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq samba cifs-utils >/dev/null
+          sudo systemctl stop smbd nmbd samba-ad-dc 2>/dev/null || true
+          sudo systemctl disable smbd nmbd 2>/dev/null || true
+          if ! sudo modprobe cifs; then
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" >/dev/null || true
+            sudo modprobe cifs
+          fi
+          { echo "kernel: $(uname -r)"; echo "smbd: $(smbd --version)"; echo "mount.cifs: $(mount.cifs -V)"; echo "cifs.ko: $(modinfo -F version cifs)"; dpkg-query -W samba cifs-utils; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build the ONE experimental Crescendarr plugin and the separate test-harness seeder
+        shell: bash
+        run: |
+          set -euo pipefail
+          for project in src/Crescendarr.Lidarr.Plugin/Crescendarr.Lidarr.Plugin.csproj tools/experiments/m17-seeder/Crescendarr.M17FixtureSeeder.csproj; do
+            name="$(basename "$project" .csproj)"
+            dotnet build "$project" -c Release --nologo --output "${RUNNER_TEMP}/out-$name" \
+              -p:CrescendarrDisposableHostBuild=true -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}"
+          done
+      - name: Kernel CIFS lane (${{ matrix.scenario }})
+        shell: bash
+        run: |
+          python3 tools/experiments/run_disposable_m23.py "${{ steps.runtime.outputs.bin }}"             "${RUNNER_TEMP}/out-Crescendarr.Lidarr.Plugin/Lidarr.Plugin.Crescendarr.dll"             "${RUNNER_TEMP}/out-Crescendarr.M17FixtureSeeder/Lidarr.Plugin.CrescendarrFixtureSeeder.dll" "${{ matrix.scenario }}"
+      - name: Always unmount and stop any leftover Samba
+        if: always()
+        shell: bash
+        run: |
+          for m in $(findmnt -rn -t cifs -o TARGET); do sudo umount -l "$m" || true; done
+          sudo pkill -9 smbd || true
+          sudo chmod -R a+rX "${RUNNER_TEMP}"/crescendarr-m23-samba-* 2>/dev/null || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m23-${{ matrix.scenario }}-evidence
+          path: |
+            ${{ runner.temp }}/m23-*-evidence.txt
+            ${{ runner.temp }}/crescendarr-m23-*/boot*.log
+            ${{ runner.temp }}/crescendarr-m23-*/crescendarr/**/*.json
+            ${{ runner.temp }}/crescendarr-m23-samba-*/log/**
+          retention-days: 7
