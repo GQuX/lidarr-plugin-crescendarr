@@ -226,7 +226,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var binding = new OperationBinding(operationId,
                     InventoryText.IsValidDownloadId(item.DownloadId) ? new DownloadBinding(clientId, item.DownloadId, null) : null,
                     staged.Album.Id, staged.Album.ForeignAlbumId, staged.MonitoredRelease.Id, staged.MonitoredRelease.ForeignReleaseId,
-                    PathStyle.Posix, Path.GetFullPath(staged.Artist.RootFolderPath).TrimEnd('/'), staging, opRoot,
+                    PathStyle.Posix, Path.GetFullPath(_rootFolders.GetBestRootFolder(staged.Artist.Path).Path).TrimEnd('/'), staging, opRoot,
                     upgrades.ToImmutableArray(), artistRoot);
                 var manifest = JournalEngine.Begin(binding);
                 Save(opRoot, manifest);
