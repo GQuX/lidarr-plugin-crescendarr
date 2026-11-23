@@ -100,8 +100,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 case "link-placed-row":
                 {
                     var ok = action == "register-placed"
-                        ? RegisterPlaced(context, context.Manifest, fresh.TrackId.Value)
-                        : LinkPlacedRow(context, context.Manifest, fresh.TrackId.Value, fresh.RowId.Value);
+                        ? RegisterPlaced(context, context.Manifest, Required(fresh.TrackId, "approval track"))
+                        : LinkPlacedRow(context, context.Manifest, Required(fresh.TrackId, "approval track"), Required(fresh.RowId, "approval row"));
                     CrescendarrGuard.Emit(_logger, $"APPROVAL_APPLIED op={context.OperationId} action={action} hostWriteOk={ok}");
                     Audit(context, $"APPLIED action={action} hostWriteOk={ok}");
                     string outcome;
