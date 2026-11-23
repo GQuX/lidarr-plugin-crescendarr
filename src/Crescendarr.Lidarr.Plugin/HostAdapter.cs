@@ -129,14 +129,18 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         }
 
         /// <summary>Real stock identification and import decisions for a folder, as a NEW single-release download.</summary>
-        public List<ImportDecision<LocalTrack>> Decide(string folder, DownloadClientItem item, bool newDownload = true)
+        /// <remarks>
+        /// ALWAYS NewDownload=true: stock ImportDecisionMaker sets ExistingFile = !NewDownload, and an
+        /// "existing" decision is imported IN PLACE wherever the file lives (observed on the real daemon).
+        /// </remarks>
+        public List<ImportDecision<LocalTrack>> Decide(string folder, DownloadClientItem item)
         {
             var files = _diskScan.GetAudioFiles(folder).ToList();
             return _decisions.GetImportDecisions(files, null, new ImportDecisionMakerInfo { DownloadClientItem = item },
                 new ImportDecisionMakerConfig
                 {
                     Filter = FilterFilesType.None,
-                    NewDownload = newDownload,
+                    NewDownload = true,
                     SingleRelease = true,
                     IncludeExisting = false,
                     AddNewArtists = false

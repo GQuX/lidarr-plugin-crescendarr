@@ -422,9 +422,8 @@ def verify_final(host: Host, data: Path, base: Path, seed: dict, release_id: int
 
     # Repeat dispatch: the same approved operation must not import twice.
     start = len(host.text())
-    host.command({"name": "CrescendarrPlan"})
-    replan = [l for l in host.text()[start:].splitlines() if l.startswith("CRESCENDARR PLAN ") and download.name in l]
-    check(replan and field(replan[-1], "disposition") == "NoImprovement", "re-observing the same download yields NoImprovement")
+    replan = [plan_until_completed(host, download.name)]  # a fresh daemon restarts the blackhole grace period
+    check(field(replan[-1], "disposition") == "NoImprovement", "re-observing the same download yields NoImprovement")
     old_plan = re.search(r"planId=(\w+)", [l for l in EVIDENCE if l.startswith("PLAN_LINE") and download.name in l][-1]).group(1)
     host.command({"name": "CrescendarrImport", "downloadId": field(replan[-1], "download"), "planId": old_plan})
     host.wait_log(r"IMPORT_REFUSED[^\n]*plan no longer current", start=start)

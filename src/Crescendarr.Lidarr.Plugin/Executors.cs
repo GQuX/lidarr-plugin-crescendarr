@@ -58,6 +58,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         public Artist Artist;
         public Album Album;
         public string ArtistMbid;
+        public string Staging;
+        public Func<bool> LoadStagedDecisions;
         public Dictionary<int, ImportDecision<LocalTrack>> StagedDecisionByTrack = new Dictionary<int, ImportDecision<LocalTrack>>();
     }
 
@@ -159,7 +161,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             if (!preflight.EditionMatches) throw new CommandFailedException("Edition preflight refused: " + preflight.Reason);
 
             var context = new OperationContext { Root = root, OperationRoot = opRoot, Artist = staged.Artist, Album = staged.Album,
-                ArtistMbid = staged.Artist.Metadata.Value.ForeignArtistId };
+                ArtistMbid = staged.Artist.Metadata.Value.ForeignArtistId, Staging = staging };
             var upgrades = new List<TrackBinding>();
             var additions = new List<(global::Crescendarr.Core.Domain.TrackDecision Plan, ImportDecision<LocalTrack> Stock, string Destination)>();
             var artistRoot = staged.Artist.Path.TrimEnd('/');
@@ -212,7 +214,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             Disk.WriteDurable(Path.Combine(opRoot, "album-lyrics.json"), JsonSerializer.Serialize(albumLyrics), replace: false);
             Disk.WriteDurable(Path.Combine(opRoot, "operation.json"), JsonSerializer.Serialize(new
             {
-                operationId, planId = plan.PlanId, downloadId = item.DownloadId, clientId, staging,
+                operationId, planId = plan.PlanId, downloadId = item.DownloadId, clientId, staging, downloadFolder = observed.Folder,
+                candidates = observed.IncomingSha,
                 artistId = staged.Artist.Id, albumId = staged.Album.Id, artistMbid = staged.Artist.Metadata.Value.ForeignArtistId,
                 additions = additions.Select(a => new { a.Plan.CandidateKey, trackId = a.Stock.Item.Tracks.Single().Id, a.Destination }).ToList(),
                 kept = plan.Decisions.Where(d => d.Action == MergeAction.KeepExisting).Select(d => d.CandidateKey).ToList()
@@ -261,9 +264,12 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     Root = root, OperationRoot = opRoot,
                     Album = _albums.GetAlbum(operation.GetProperty("albumId").GetInt32()),
                     Artist = _artists.GetArtist(operation.GetProperty("artistId").GetInt32()),
-                    ArtistMbid = operation.GetProperty("artistMbid").GetString()
+                    ArtistMbid = operation.GetProperty("artistMbid").GetString(),
+                    Staging = staging
                 };
-                StagedDecisions(context, staging);
+                var downloadFolder = operation.GetProperty("downloadFolder").GetString();
+                var candidates = operation.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
+                context.LoadStagedDecisions = () => RefillAndDecide(context, downloadFolder, candidates);
                 var outcome = "Completed";
                 if (File.Exists(journalPath))
                 {
@@ -277,6 +283,11 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     var manifest = load.Manifest;
                     CrescendarrGuard.Emit(_logger, $"RECOVERY_START op={Path.GetFileName(opRoot)} status={manifest.Status} generation={manifest.Generation}");
                     outcome = RunJournal(context, manifest);
+                }
+
+                if (outcome == "Completed" && context.StagedDecisionByTrack.Count == 0 && !context.LoadStagedDecisions())
+                {
+                    outcome = "RequiresReview";
                 }
 
                 if (outcome == "Completed")
@@ -309,17 +320,41 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             }
         }
 
-        /// <summary>Recompute stock decisions from the operation-owned staged copies (never from stored command bodies).</summary>
-        private void StagedDecisions(OperationContext context, string staging)
+        /// <summary>
+        /// Recovery: refill consumed staged copies from the STILL-INTACT completed download (hash-verified against the
+        /// operation record), then recompute stock NEW-download decisions on the complete album. Never from stored
+        /// command bodies, never NewDownload=false. Called lazily, never while a native step is declared in flight.
+        /// </summary>
+        private bool RefillAndDecide(OperationContext context, string downloadFolder, Dictionary<string, string> candidates)
         {
-            if (!Directory.Exists(staging)) return;
-            // Recovery: some staged copies were already consumed, so stock's new-download "missing tracks"
-            // rule would reject the rest. Every other stock specification (upgrade, edition, match) still applies.
-            foreach (var decision in _adapter.Decide(staging, null, newDownload: false))
+            foreach (var (key, sha) in candidates)
+            {
+                var staged = Path.Combine(context.Staging, key);
+                if (File.Exists(staged)) continue;
+                var source = Path.Combine(downloadFolder, key);
+                if (!File.Exists(source) || Disk.HasLinkInChain(source, context.Root) || Disk.Sha(source) != sha)
+                {
+                    CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW completed download changed or vanished: {key}");
+                    return false;
+                }
+
+                Disk.CopyVerified(source, staged, sha);
+            }
+
+            context.StagedDecisionByTrack.Clear();
+            foreach (var decision in _adapter.Decide(context.Staging, null))
             {
                 if (decision.Item.Tracks?.Count == 1) context.StagedDecisionByTrack[decision.Item.Tracks[0].Id] = decision;
             }
+
+            CrescendarrGuard.Emit(_logger, $"RECOVERY_DECISIONS staged={context.StagedDecisionByTrack.Count} approved={context.StagedDecisionByTrack.Values.Count(d => d.Approved)}");
+            return true;
         }
+
+        /// <summary>Only a stock NEW-download decision on an operation-owned staged copy may reach the native importer.</summary>
+        private static bool SafeDecision(OperationContext context, ImportDecision<LocalTrack> decision) =>
+            decision.Approved && !decision.Item.ExistingFile && context.Staging != null &&
+            Disk.IsUnder(context.Staging.TrimEnd('/'), Path.GetFullPath(decision.Item.Path));
 
         // ------------------------------------------------------------------ M13 journal loop
 
@@ -386,7 +421,13 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         _lyrics.Delete(binding.Lyric.LyricFileId);
                         break;
                     case RecoveryAction.InvokeNativeUpgrade:
-                        if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision)) return "RequiresReview";
+                        if (!context.StagedDecisionByTrack.ContainsKey(trackId) && context.LoadStagedDecisions != null && !context.LoadStagedDecisions()) return "RequiresReview";
+                        if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision) || !SafeDecision(context, decision))
+                        {
+                            CrescendarrGuard.Emit(_logger, $"NATIVE_REFUSED track={trackId} no safe staged new-download decision");
+                            return "RequiresReview";
+                        }
+
                         Declared(JournalStep.NativeUpgrade);
                         var results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
                         nativeCount++;
@@ -438,7 +479,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 // Predict the stock destination from THIS decision (naming can depend on how it was identified).
                 var destination = _fileNames.BuildTrackFilePath(stock.Item.Tracks, context.Artist, context.Album,
                     new TrackFile { Path = stock.Item.Path, SceneName = stock.Item.SceneName }, Path.GetExtension(stock.Item.Path));
-                if (fresh.TrackFileId != 0 || File.Exists(destination) || !stock.Approved ||
+                if (fresh.TrackFileId != 0 || File.Exists(destination) || !SafeDecision(context, stock) ||
                     !Disk.IsUnder(context.Artist.Path.TrimEnd('/'), destination) || Disk.HasLinkInChain(Path.GetDirectoryName(destination), context.Root))
                 {
                     CrescendarrGuard.Emit(_logger, $"ADD_MISSING_REVIEW track={track.Id} host changed, destination occupied or decision not approved: {destination}");
@@ -467,6 +508,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 detail = verified;
             }
 
+            // Completion cleanup: operation-owned staged copies only. Backups, journal and the completed download stay.
+            if (outcome == "Completed" && context.Staging != null && Directory.Exists(context.Staging) && Disk.IsUnder(context.Root, context.Staging))
+                Directory.Delete(context.Staging, recursive: true);
             Disk.WriteDurable(Path.Combine(context.OperationRoot, "outcome.json"),
                 JsonSerializer.Serialize(new { outcome, detail, utc = DateTime.UtcNow }), replace: false);
             CrescendarrGuard.Emit(_logger, $"IMPORT_OUTCOME op={Path.GetFileName(context.OperationRoot)} outcome={outcome} detail=\"{detail}\"");
