@@ -353,7 +353,7 @@ def run(bin_dir: Path, seeder: Path, candidate: Path, sab_dir: Path, python: str
         time.sleep(150)
         attribute(lane, host, before, "after-good-with-stock-cdh", stock_may_import=True)
         queue = host.api("GET", "queue?includeUnknownArtistItems=true")
-        note(f"STOCK_QUEUE {[(r.get('title'), r.get('trackedDownloadState'), r.get('trackedDownloadStatus')) for r in queue.get('records', [])]}")
+        note(f"STOCK_QUEUE {[(r.get('title'), r.get('trackedDownloadState'), r.get('trackedDownloadStatus'), [m.get('messages') for m in r.get('statusMessages') or []]) for r in queue.get('records', [])]}")
 
         # --- 4. symlinked download path (selected client) and an unselected client --------------------------------------
         before = Snapshot(lane, host, "before-paths")
@@ -390,19 +390,24 @@ def run(bin_dir: Path, seeder: Path, candidate: Path, sab_dir: Path, python: str
 
         # --- 6. unavailable storage: the SMB server stops answering ------------------------------------------------------
         before = Snapshot(lane, host, "before-storage-outage")
+        report_before = (lane.data / "crescendarr-audit" / "report.json").read_bytes()
+        expected = {k: (v["state"], [(t["Track"], t["Action"]) for t in v["tracks"]]) for k, v in report(lane).items()}
         share.signal_server(signal.SIGSTOP)
         try:
-            frozen = cycle(host)
-            entries = report(lane)
-            note(f"OUTAGE_REPORT {[(k, v['state']) for k, v in entries.items()]}")
-            check("AUDIT_CYCLE_SUMMARY" in frozen, "the audit cycle finished while the SMB server was not answering")
-            if wrong_folder.name in entries:
-                check(entries[wrong_folder.name]["state"] == "LibraryUnavailable" and not entries[wrong_folder.name]["tracks"],
-                      "with the library unreachable the remaining download is reported LibraryUnavailable (no preview, nothing 'missing')")
-            check(not any(t["Action"] == "Add" for v in entries.values() for t in v["tracks"] if v["state"] != "WouldImport"),
-                  "no download is previewed as missing tracks while the library is unreachable")
+            pushed = host.push({"name": "CrescendarrAuditCycle", "reason": "m27-outage"})
+            time.sleep(90)
+            during = host.api("GET", f"command/{pushed['id']}")
+            note(f"OUTAGE_COMMAND status={status(during)} after 90 s with every smbd stopped")
+            check((lane.data / "crescendarr-audit" / "report.json").read_bytes() == report_before,
+                  "while the SMB server is not answering, the audit writes no preview at all (nothing is reported missing or new)")
         finally:
             share.signal_server(signal.SIGCONT)
+        limit = time.monotonic() + 300
+        while status(host.api("GET", f"command/{pushed['id']}")) not in ("completed", "failed") and time.monotonic() < limit:
+            time.sleep(3)
+        check(status(host.api("GET", f"command/{pushed['id']}")) == "completed", "after the server answers again the blocked audit cycle completes")
+        resumed = {k: (v["state"], [(t["Track"], t["Action"]) for t in v["tracks"]]) for k, v in report(lane).items()}
+        check(resumed == expected, f"the resumed cycle reports exactly the previews from before the outage ({resumed})")
         time.sleep(20)
         attribute(lane, host, before, "after-storage-outage", stock_may_import=False)
 
