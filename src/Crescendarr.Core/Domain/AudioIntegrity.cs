@@ -48,16 +48,20 @@ public static class AudioIntegrity
 
         if (position >= end) return "no audio frames after the tags";
         var frames = 0;
-        while (position + 4 <= end)
+        while (position < end)
         {
+            if (end - position < 4)
+                return $"trailing {end - position} bytes at {position} do not form a complete MPEG frame header";
             var length = FrameLength(data.Slice(position, 4));
             if (length <= 0) return $"lost MPEG frame sync at byte {position} after {frames} frames (hole or corruption)";
+            if (length > end - position)
+                return $"truncated MPEG frame at byte {position} after {frames} frames (expected {length} bytes, found {end - position})";
             position += length;
             frames++;
         }
 
-        // A single trailing partial frame is tolerated; anything left before the end is not a frame header.
-        if (end - position > 3) return $"{end - position} trailing bytes at {position} are not a frame header";
+        // Even a complete final header is not evidence of a complete last frame.
+        // A file cut short after that header must fail closed, including one-byte truncations.
         return frames == 0 ? "no audio frames" : null;
     }
 
