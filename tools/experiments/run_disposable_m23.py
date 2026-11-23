@@ -74,6 +74,9 @@ def lane_baseline(lane: Lane, upgrades: list[int], superior: int, added: list[in
             if rescanned.get(n) != final[n]:
                 note(f"RESCAN_CHANGED track={n} before={final[n]} after={rescanned.get(n)}")
         check(status(scan) == "completed" and rescanned == final, "stock rescan over CIFS changed nothing")
+        time.sleep(8)  # past closetimeo/actimeo: what the SERVER now reports, not the client cache
+        note("KNOWN_FILTER_AFTER_SETTLE (8 s later)")
+        diagnose_known_filter(lane)
         host = replay_and_restart(lane, host, final, "after-replay")
     finally:
         host.stop()
