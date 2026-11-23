@@ -21,18 +21,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: crescendarr
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: Lidarr/Lidarr
           # Commit underlying official stable v3.1.6.5079 tag, not a moving branch.
           ref: da7b4dfb1a9e7e1d6625c2dbc3fff96971ab26bd
           path: upstream-lidarr
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Verify pinned Lidarr source revision and stage original characterization tests

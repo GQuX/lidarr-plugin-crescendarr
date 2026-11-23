@@ -32,10 +32,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Pull the LinuxServer.io Lidarr image and record its exact identity
@@ -128,7 +128,7 @@ jobs:
           sudo chmod -R a+rX "${RUNNER_TEMP}"/crescendarr-m27-* 2>/dev/null || true
       - name: Upload redacted evidence (no DB copies; they hold the ephemeral SAB API key)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: m27-lsio-evidence
           path: |

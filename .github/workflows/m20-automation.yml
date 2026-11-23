@@ -29,10 +29,10 @@ jobs:
       matrix:
         scenario: [auto-guarded, auto-audit, auto-crash-restart, auto-busy-album]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
@@ -67,7 +67,7 @@ jobs:
             "${{ matrix.scenario }}"
       - name: Upload evidence (logs, DB copies, journals, plans)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: m20-${{ matrix.scenario }}-evidence
           path: |

@@ -25,10 +25,10 @@ jobs:
       matrix:
         scenario: [cifs-three, cifs-twelve, cifs-sigkill-rescan, cifs-server-loss, cifs-unmounted, cifs-readonly]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
@@ -80,7 +80,7 @@ jobs:
           sudo chmod -R a+rX "${RUNNER_TEMP}"/crescendarr-m23-samba-* 2>/dev/null || true
       - name: Upload evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: m23-${{ matrix.scenario }}-evidence
           path: |
