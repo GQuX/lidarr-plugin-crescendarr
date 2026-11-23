@@ -152,8 +152,9 @@ def attribute(lane: Lane, host: Host, before: Snapshot, label: str, stock_may_im
         note(f"STOCK_ATTRIBUTED {label} stock wrote the library ({len(writes)} History write event(s)); Crescendarr's share is zero by construction")
     else:
         note(f"NO_LIBRARY_CHANGE {label}")
-    check(not [p for p in (lane.base / "library").rglob("*") if "crescendarr" in p.name.lower() or "probe" in p.name.lower()],
-          f"{label}: no Crescendarr or probe file anywhere in the library")
+    # (The synthetic artist is literally named "Crescendarr Synthetic Artist"; new files are caught by the tree diff above.)
+    check(not [p for p in (lane.base / "library").rglob("*") if "probe" in p.name.lower() or ".partial-" in p.name],
+          f"{label}: no probe or partial file anywhere in the library")
     check(not (lane.base / "crescendarr").exists() and not (lane.data / "crescendarr").exists(), f"{label}: no writer state folder")
     only_state = [str(p.relative_to(lane.data)) for p in lane.data.rglob("*") if "crescendarr" in str(p.relative_to(lane.data)).lower()
                   and not str(p.relative_to(lane.data)).startswith(("crescendarr-audit", "plugins"))]
