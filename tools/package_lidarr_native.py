@@ -33,6 +33,12 @@ def make_package(dll: Path, version: str, dest: Path) -> Path:
     data = dll.read_bytes()
     if not data.startswith(b"MZ"):
         raise ValueError("expected a compiled .NET assembly, not source or a different artifact")
+    # Defense in depth, NOT a replacement for tools/audit-scan's full metadata/IL verifier:
+    # wrong-flavor writer assemblies must never become a GitHub installer asset by accident.
+    if b"CrescendarrAuditCycleCommand" not in data or b"AuditBarrier" not in data:
+        raise ValueError("audit-only build markers are missing; refusing to package")
+    if any(name in data for name in (b"CrescendarrImportCommand", b"CrescendarrRecoverCommand", b"CrescendarrApproveCommand")):
+        raise ValueError("writer command detected in DLL; refusing to package")
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / f"Crescendarr-v{version}.net8.0.zip"
     with zipfile.ZipFile(path, "w") as archive:
