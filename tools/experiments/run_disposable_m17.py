@@ -424,7 +424,8 @@ def verify_final(host: Host, data: Path, base: Path, seed: dict, release_id: int
     start = len(host.text())
     replan = [plan_until_completed(host, download.name)]  # a fresh daemon restarts the blackhole grace period
     check(field(replan[-1], "disposition") == "NoImprovement", "re-observing the same download yields NoImprovement")
-    old_plan = re.search(r"planId=(\w+)", [l for l in EVIDENCE if l.startswith("PLAN_LINE") and download.name in l][-1]).group(1)
+    # The ORIGINAL approved (Ready) plan, dispatched a second time.
+    old_plan = re.search(r"planId=(\w+)", [l for l in EVIDENCE if l.startswith("PLAN_LINE") and download.name in l and "disposition=Ready" in l][0]).group(1)
     host.command({"name": "CrescendarrImport", "downloadId": field(replan[-1], "download"), "planId": old_plan})
     host.wait_log(r"IMPORT_REFUSED[^\n]*plan no longer current", start=start)
     check(library_view(db_state(data, "after-repeat", base), seed, release_id) == after, "repeat dispatch imported nothing")
