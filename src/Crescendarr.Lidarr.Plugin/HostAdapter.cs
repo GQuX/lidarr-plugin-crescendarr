@@ -40,6 +40,15 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         public string Blocked;
     }
 
+    /// <summary>What every Crescendarr-named stock client reported this time, with unsafe items and failing clients isolated.</summary>
+    public sealed class ClientObservation
+    {
+        public List<(DownloadClientItem Item, int ClientId, string WatchFolder)> Completed = new List<(DownloadClientItem, int, string)>();
+        public List<(DownloadClientItem Item, int ClientId, string Folder, string Reason)> Refused = new List<(DownloadClientItem, int, string, string)>();
+        public List<string> ClientErrors = new List<string>();
+        public List<string> Notes = new List<string>();
+    }
+
     /// <summary>Quality comparison supplied by the artist's ACTUAL stock quality profile, never by format or size.</summary>
     public sealed class StockQualityPolicy : IHostQualityPolicy
     {
@@ -110,8 +119,19 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// </summary>
         public List<(DownloadClientItem Item, int ClientId, string WatchFolder)> CompletedItems(string root, out List<string> notes)
         {
-            notes = new List<string>();
-            var result = new List<(DownloadClientItem, int, string)>();
+            var observed = ObserveClients(root);
+            notes = observed.Notes;
+            return observed.Completed;
+        }
+
+        /// <summary>
+        /// M22: per-client and per-item isolation. An unavailable or failing client, or one item reporting an output folder
+        /// outside the disposable downloads folder (or through a link), is recorded with an actionable reason and SKIPPED;
+        /// it never aborts observation of the other clients and items, and is never treated as settlement.
+        /// </summary>
+        public ClientObservation ObserveClients(string root)
+        {
+            var result = new ClientObservation();
             var downloads = Path.Combine(root, "downloads");
             foreach (var client in _clients.DownloadHandlingEnabled())
             {
@@ -124,14 +144,28 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     if (!Disk.IsUnder(root, confine)) throw new CrescendarrGuardException("Synthetic client watch folder is outside the disposable root.");
                 }
 
-                foreach (var item in client.GetItems())
+                List<DownloadClientItem> items;
+                try
                 {
-                    notes.Add($"{client.Definition.Implementation}:{item.DownloadId}:{item.Status}");
+                    items = client.GetItems().ToList();
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    result.ClientErrors.Add($"{client.Definition.Name} ({client.Definition.Implementation}) unavailable: {error.GetType().Name}: {error.Message}");
+                    continue;
+                }
+
+                foreach (var item in items)
+                {
+                    result.Notes.Add($"{client.Definition.Implementation}:{item.DownloadId}:{item.Status}");
                     if (item.Status != DownloadItemStatus.Completed || item.OutputPath.IsEmpty) continue;
                     var output = Path.GetFullPath(item.OutputPath.FullPath).TrimEnd('/');
-                    if (!Disk.IsUnder(confine, output) || Disk.HasLinkInChain(output, root))
-                        throw new CrescendarrGuardException("Completed item escapes the disposable downloads folder or traverses a link.");
-                    result.Add((item, client.Definition.Id, confine));
+                    if (!Disk.IsUnder(confine, output))
+                        result.Refused.Add((item, client.Definition.Id, output, $"completed folder is outside the disposable downloads folder ({confine}); check the client's category folder or a remote path mapping"));
+                    else if (Disk.HasLinkInChain(output, root))
+                        result.Refused.Add((item, client.Definition.Id, output, "completed folder is reached through a symbolic link"));
+                    else
+                        result.Completed.Add((item, client.Definition.Id, confine));
                 }
             }
 
@@ -191,8 +225,22 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 o.IncomingSha[key] = Disk.Sha(decision.Item.Path);
             }
 
+            // M22: a client may report "Completed" for a job with a missing article (real SABnzbd without par2 does). Every
+            // incoming MP3 must be an unbroken MPEG frame chain, or the whole download is refused with the reason.
+            foreach (var (key, decision) in o.ByCandidate.OrderBy(k => k.Key, StringComparer.Ordinal))
+            {
+                if (!string.Equals(Path.GetExtension(decision.Item.Path), ".mp3", StringComparison.OrdinalIgnoreCase)) continue;
+                var problem = global::Crescendarr.Core.Domain.AudioIntegrity.Mp3Problem(File.ReadAllBytes(decision.Item.Path));
+                if (problem != null)
+                {
+                    o.Blocked = $"incoming audio failed the integrity check ({key}: {problem}); the download may be incomplete";
+                    break;
+                }
+            }
+
             var albums = o.Decisions.Where(d => d.Item.Album != null).Select(d => d.Item.Album.Id).Distinct().ToList();
             var releases = o.Decisions.Where(d => d.Item.Release != null).Select(d => d.Item.Release.Id).Distinct().ToList();
+            if (o.Blocked != null) return o;
             if (o.Decisions.Count == 0) o.Blocked = "no audio files";
             else if (albums.Count != 1 || releases.Count != 1 || o.Decisions.Any(d => d.Item.Album == null || d.Item.Release == null))
                 o.Blocked = "candidate files do not identify exactly one album edition";

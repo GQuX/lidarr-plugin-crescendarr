@@ -38,6 +38,7 @@ var specs = new (string Name, Action Test)[]
     ("Changing existing quality changes plan identity", ChangedExistingQuality),
     ("Changes to unrelated existing records change plan identity", ChangedUnrelatedInventory),
     ("A shared existing track-file ID blocks the whole album", SharedExistingTrackFileId),
+    ("M22 incoming MP3 must be a continuous frame chain (holes, shifts and junk are refused)", Mp3Integrity),
     ("Changing incoming edition changes plan identity", ChangedIncomingEdition),
     ("Changing staged lyric inventory changes plan identity", ChangedStagedLyrics)
 };
@@ -129,6 +130,33 @@ static void F13()
     var b = Plan(Download([Candidate(1), Candidate(2)]), Album([Old(1)]));
     Expect(a.PlanId == b.PlanId, "order-independent idempotency key expected");
     Expect(a.Decisions.Select(d => d.CandidateKey).SequenceEqual(b.Decisions.Select(d => d.CandidateKey)), "stable ordering expected");
+}
+static byte[] Frames(int kbps, int count)
+{
+    var length = 144 * kbps * 1000 / 44100;
+    var index = kbps switch { 192 => 11, 256 => 13, 320 => 14, _ => throw new ArgumentException("kbps") };
+    var bytes = new byte[length * count];
+    for (var f = 0; f < count; f++) { bytes[f * length] = 0xFF; bytes[f * length + 1] = 0xFB; bytes[f * length + 2] = (byte)(index << 4); bytes[f * length + 3] = 0xC4; }
+    return bytes;
+}
+static void Mp3Integrity()
+{
+    var id3 = new byte[] { (byte)'I', (byte)'D', (byte)'3', 3, 0, 0, 0, 0, 1, 0 }.Concat(new byte[128]).ToArray(); // 128-byte tag incl. padding
+    var audio = Frames(256, 200);
+    var v1 = new byte[128]; v1[0] = (byte)'T'; v1[1] = (byte)'A'; v1[2] = (byte)'G';
+    Expect(AudioIntegrity.Mp3Problem(audio) is null, "bare frames are continuous");
+    Expect(AudioIntegrity.Mp3Problem(id3.Concat(audio).Concat(v1).ToArray()) is null, "ID3v2 + frames + ID3v1 is continuous");
+    Expect(AudioIntegrity.Mp3Problem(id3.Concat(audio[..(audio.Length - 300)]).ToArray()) is not null, "a truncated last MPEG frame must be refused");
+    Expect(AudioIntegrity.Mp3Problem(audio[..^1]) is not null, "a one-byte-truncated final MPEG frame must be refused");
+    Expect(AudioIntegrity.Mp3Problem(audio.Concat(new byte[] { 1, 2, 3 }).ToArray()) is not null, "trailing bytes without a complete frame must be refused");
+    var hole = id3.Concat(audio).ToArray();
+    Array.Clear(hole, id3.Length + 835 * 50, 120_000 > 835 * 40 ? 835 * 40 : 120_000);
+    Expect(AudioIntegrity.Mp3Problem(hole) is not null, "a zero-filled hole (missing article) is refused");
+    var shifted = id3.Concat(audio[..(835 * 60)]).Concat(audio[(835 * 60 + 400)..]).ToArray();
+    Expect(AudioIntegrity.Mp3Problem(shifted) is not null, "a removed chunk (shifted frames) is refused");
+    Expect(AudioIntegrity.Mp3Problem(id3.Concat(audio).Concat(new byte[500]).ToArray()) is not null, "trailing junk is refused");
+    Expect(AudioIntegrity.Mp3Problem(id3) is not null, "a tag without audio is refused");
+    Expect(AudioIntegrity.Mp3Problem(id3.Concat(Frames(192, 50)).Concat(Frames(320, 50)).ToArray()) is null, "VBR-style mixed bitrates stay continuous");
 }
 static void F17()
 {

@@ -258,7 +258,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var counters = new Dictionary<string, int>(StringComparer.Ordinal)
             {
                 ["observed"] = 0, ["ready"] = 0, ["awaitingApproval"] = 0, ["imported"] = 0, ["noImprovement"] = 0, ["review"] = 0,
-                ["alreadyHandled"] = 0, ["blockedAlbum"] = 0, ["recovered"] = 0, ["pendingRecovery"] = 0, ["errors"] = 0,
+                ["alreadyHandled"] = 0, ["blockedAlbum"] = 0, ["recovered"] = 0, ["pendingRecovery"] = 0, ["refused"] = 0, ["errors"] = 0,
             };
             var settings = CrescendarrConfiguration.Read(_notifications, out var problem);
             var mode = settings == null ? CrescendarrMode.Disabled : (CrescendarrMode)settings.Mode;
@@ -300,7 +300,27 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
             // 2. Observe and plan every completed download; import only fresh Ready plans (GuardedAuto).
             var imports = 0;
-            foreach (var (item, clientId, watch) in _adapter.CompletedItems(root, out _))
+            var clients = _adapter.ObserveClients(root);
+            foreach (var clientProblem in clients.ClientErrors)
+            {
+                // Visible, never settlement: an unreachable client leaves every registry entry exactly as it was.
+                counters["errors"]++;
+                CrescendarrGuard.Emit(_logger, "CYCLE_CLIENT_ERROR " + clientProblem);
+            }
+
+            foreach (var (item, clientId, folder, reason) in clients.Refused)
+            {
+                counters["refused"]++;
+                var registryPath = Disk.RequireConfined(root, Path.Combine(root, "crescendarr", "downloads", Disk.Sha(Encoding.UTF8.GetBytes(folder))[..16] + ".json"), "download registry");
+                Disk.WriteDurable(registryPath, JsonSerializer.Serialize(new
+                {
+                    downloadId = item.DownloadId, clientDefinitionId = clientId, folder, inventoryDigest = (string)null, state = "RefusedUnsafePath", reason,
+                    pluginHandled = false, lidarrImported = false, downloaderRemoved = false, sourceRetained = Directory.Exists(folder), lastSeen = DateTime.UtcNow
+                }, new JsonSerializerOptions { WriteIndented = true }), replace: true);
+                CrescendarrGuard.Emit(_logger, $"CYCLE_REFUSED_ITEM download=\"{item.DownloadId}\" folder=\"{folder}\" reason=\"{reason}\"");
+            }
+
+            foreach (var (item, clientId, watch) in clients.Completed)
             {
                 counters["observed"]++;
                 try
@@ -360,7 +380,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         settlement = "Plugin-local record only. Crescendarr never calls the client's RemoveItem and never marks the stock queue imported (CDH OFF).",
                         firstSeen = previous?.TryGetProperty("firstSeen", out var first) == true ? first.GetDateTime() : DateTime.UtcNow, lastSeen = DateTime.UtcNow
                     }, new JsonSerializerOptions { WriteIndented = true }), replace: true);
-                    CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" disposition={disposition} state={state} plan={observation.Plan?.PlanId}");
+                    CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" disposition={disposition} state={state} plan={observation.Plan?.PlanId} reason=\"{observation.Blocked}\"");
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
