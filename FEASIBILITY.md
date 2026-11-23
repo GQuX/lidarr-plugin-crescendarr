@@ -1,3 +1,13 @@
+# M24/M25 update (draft PRs #63, #64): stale registry decisions fixed; audit-only beta candidate
+
+**M24.** The registry binds "Imported" to the operation's own completion evidence, and re-evaluates `NoImprovement`, `NeedsReview` and `Blocked` decisions when the library, profile or edition changes. A completed import is never replayed. The four new stock-daemon lanes were red on the old plugin and are now green. See [`docs/release-gates/m24-registry-reevaluation.md`](docs/release-gates/m24-registry-reevaluation.md).
+
+**M25.** An installable, demonstrably read-only **audit-only beta candidate**: a reproducible zip produced as a CI artifact only. It is a second build of the same plugin, with no writer code compiled in, proven by an IL scan that rejects the writer build. It uses ordinary, explicitly selected clients and previews per track. Zero library mutation is proven under command and settings injection, restarts, profile changes, path refusals and an unreadable library. Install, upgrade, rollback and uninstall are proven. See [`docs/release-gates/m25-audit-beta.md`](docs/release-gates/m25-audit-beta.md).
+
+**Not published.** A first field test needs an owner decision. Write-enabled remains **NO-GO**.
+
+---
+
 # M23 update (issue #58, draft PR #59): real kernel CIFS (SMB 3.1.1) library
 
 **PROVEN on a real Linux kernel CIFS mount** (loopback Samba 4.19.5, `cifs.ko` 2.59, `vers=3.1.1`, `soft`), run [45208473594](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45208473594), 6/6:
