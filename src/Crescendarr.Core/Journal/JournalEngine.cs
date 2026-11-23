@@ -72,13 +72,37 @@ public static class JournalEngine
         RequireActive(manifest);
         var progress = FindAddition(manifest, trackId);
         if (!progress.InFlight) throw new JournalTransitionException($"Addition {trackId} was not declared in flight.");
-        if (newTrackFileId is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == newTrackFileId) ||
+        if (newTrackFileId is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == newTrackFileId || manifest.ProgressFor(t.TrackId).ObservedOriginalTrackFileId == newTrackFileId) ||
             manifest.Binding.Kept.Any(k => k.TrackFileId == newTrackFileId))
             throw new JournalTransitionException($"Addition {trackId}: must record a fresh, positive track-file ID.");
         if (manifest.Progress.Any(p => p.NewTrackFileId == newTrackFileId) || manifest.Additions.Any(a => a.TrackId != trackId && a.NewTrackFileId == newTrackFileId))
             throw new JournalTransitionException($"Addition {trackId}: track-file ID {newTrackFileId} is already recorded for another track.");
         return ReplaceAddition(manifest, progress with { Phase = AdditionPhase.Added, InFlight = false, NewTrackFileId = newTrackFileId });
     }
+
+    /// <summary>The current row ID that holds a replacement's ORIGINAL file: the latest rebase evidence, else the bound ID.</summary>
+    public static int EffectiveOriginal(OperationManifest manifest, TrackBinding track) =>
+        manifest.ProgressFor(track.TrackId).ObservedOriginalTrackFileId ?? track.OriginalTrackFileId;
+
+    /// <summary>
+    /// M19: record that a host rescan replaced the original row of a replacement whose native step never started.
+    /// Only evidence is added; the binding (and its digest) never changes.
+    /// </summary>
+    public static OperationManifest RecordOriginalRebase(OperationManifest manifest, int trackId, int observedTrackFileId)
+    {
+        RequireActive(manifest);
+        var progress = Find(manifest, trackId);
+        var track = manifest.BindingFor(trackId);
+        if (progress.InFlight is not null) throw new JournalTransitionException($"Track {trackId}: cannot rebase while {progress.InFlight} is in flight.");
+        if (progress.Phase >= TrackPhase.Upgraded) throw new JournalTransitionException($"Track {trackId}: already upgraded; its original no longer exists.");
+        if (observedTrackFileId <= 0 || observedTrackFileId == EffectiveOriginal(manifest, track) || UsedElsewhere(manifest, trackId, observedTrackFileId))
+            throw new JournalTransitionException($"Track {trackId}: rebase must record a different, unused, positive track-file ID.");
+        return Replace(manifest, progress with { ObservedOriginalTrackFileId = observedTrackFileId });
+    }
+
+    private static bool UsedElsewhere(OperationManifest m, int trackId, int id) =>
+        m.Binding.Tracks.Any(t => t.TrackId != trackId && (t.OriginalTrackFileId == id || m.ProgressFor(t.TrackId).ObservedOriginalTrackFileId == id)) ||
+        m.Binding.Kept.Any(k => k.TrackFileId == id) || m.Progress.Any(p => p.NewTrackFileId == id) || m.Additions.Any(a => a.NewTrackFileId == id);
 
     public static OperationManifest AbandonAddition(OperationManifest manifest, int trackId)
     {
@@ -179,7 +203,8 @@ public static class JournalEngine
     {
         // A fresh row is required: never reuse the deleted original row's numeric ID, nor any
         // other bound original ID.
-        if (id is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == id) || manifest.Binding.Kept.Any(k => k.TrackFileId == id))
+        if (id is not > 0 || manifest.Binding.Tracks.Any(t => t.OriginalTrackFileId == id || manifest.ProgressFor(t.TrackId).ObservedOriginalTrackFileId == id) ||
+            manifest.Binding.Kept.Any(k => k.TrackFileId == id))
             throw new JournalTransitionException($"Track {track.TrackId}: upgrade must record a fresh, positive track-file ID.");
         if (manifest.Progress.Any(p => p.TrackId != track.TrackId && p.NewTrackFileId == id) || manifest.Additions.Any(a => a.NewTrackFileId == id))
             throw new JournalTransitionException($"Track {track.TrackId}: track-file ID {id} is already recorded for another track.");

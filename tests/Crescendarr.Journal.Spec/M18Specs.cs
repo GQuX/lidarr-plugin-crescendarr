@@ -51,6 +51,19 @@ internal static class M18Specs
         };
     }
 
+    /// <summary>M19: the same album plus a SECOND replacement (track 4) that is still unstarted when track 1 crashes.</summary>
+    public static OperationBinding BindingTwoUpgrades()
+    {
+        var b = Binding();
+        var second = new TrackBinding(4, Rec(4), 14, Artist + "/04.mp3", Artist + "/04.mp3", "/m18/staging/04.mp3", C('7', 100), C('8', 120), Ops("audio", "4.mp3"),
+            new LyricBinding(24, "04.lrc", Artist + "/04.lrc", C('9', 12), Ops("track-lyrics", "4.lrc")));
+        return b with
+        {
+            Tracks = b.Tracks.Add(second),
+            AlbumLyrics = b.AlbumLyrics.Add(new AlbumLyricBinding(24, 4, "04.lrc", Artist + "/04.lrc", C('9', 12), Ops("album-lyrics", "24.lrc"))),
+        };
+    }
+
     /// <summary>In-memory host + filesystem with the stock behaviours observed on the real daemon.</summary>
     private sealed class World
     {
@@ -66,6 +79,19 @@ internal static class M18Specs
         };
 
         public readonly List<HostTrack> Foreign = new();
+
+        public World(bool secondUpgrade = false)
+        {
+            if (!secondUpgrade) return;
+            Links[4] = 14;
+            Rows[14] = Artist + "/04.mp3";
+            Lyrics.Add(new HostLyric(24, 14, "04.lrc"));
+            Files[Artist + "/04.mp3"] = C('7', 100);
+            Files[Artist + "/04.lrc"] = C('9', 12);
+            Files["/m18/staging/04.mp3"] = C('8', 120);
+            Files[Ops("album-lyrics", "24.lrc")] = C('9', 12);
+        }
+
         public readonly List<string> Recycled = new();
         private int _nextRow = 31;
         private int _nextLyric = 41;
@@ -95,20 +121,22 @@ internal static class M18Specs
         }
 
         /// <summary>Stock upgrade up to the post-move/pre-row boundary (CreateAfterTrackImport), optionally finishing it.</summary>
-        public void NativeUpgrade(int track, string original, string incoming, string destination, bool finish)
+        public void NativeUpgrade(int track, string original, string incoming, string destination, bool finish, bool rowOnly = false)
         {
             Files.Remove(original);
             DeleteRow(Links[track]);
             Files[destination] = Files[incoming];
             Files.Remove(incoming);
-            if (finish) Links[track] = InsertRow(destination);
+            if (rowOnly) InsertRow(destination);
+            else if (finish) Links[track] = InsertRow(destination);
         }
 
-        public void NativeAdd(int track, string incoming, string destination, bool finish)
+        public void NativeAdd(int track, string incoming, string destination, bool finish, bool rowOnly = false)
         {
             Files[destination] = Files[incoming];
             Files.Remove(incoming);
-            if (finish) Links[track] = InsertRow(destination);
+            if (rowOnly) InsertRow(destination);
+            else if (finish) Links[track] = InsertRow(destination);
         }
 
         /// <summary>Stock rescan with an unregistered album audio file: every album file re-imported with a fresh row.</summary>
@@ -167,14 +195,14 @@ internal static class M18Specs
                 case RecoveryAction.InvokeNativeUpgrade:
                     var u = m.BindingFor(id);
                     m = JournalEngine.MarkInFlight(m, id, JournalStep.NativeUpgrade);
-                    w.NativeUpgrade(id, u.OriginalPath, u.IncomingPath, u.DestinationPath, finish: crashInside != "upgrade");
-                    if (crashInside == "upgrade") return (m, Verdict.Proceed, r);
+                    w.NativeUpgrade(id, u.OriginalPath, u.IncomingPath, u.DestinationPath, finish: crashInside != "upgrade", rowOnly: crashInside == "upgrade-row");
+                    if (crashInside is "upgrade" or "upgrade-row") return (m, Verdict.Proceed, r);
                     break;
                 case RecoveryAction.InvokeNativeAdd:
                     var a = m.AdditionBindingFor(id);
                     m = JournalEngine.MarkAdditionInFlight(m, id);
-                    w.NativeAdd(id, a.IncomingPath, a.DestinationPath, finish: crashInside != "add");
-                    if (crashInside == "add") return (m, Verdict.Proceed, r);
+                    w.NativeAdd(id, a.IncomingPath, a.DestinationPath, finish: crashInside != "add", rowOnly: crashInside == "add-row");
+                    if (crashInside is "add" or "add-row") return (m, Verdict.Proceed, r);
                     break;
                 case RecoveryAction.RelinkLyric:
                     if (m.ProgressFor(id).InFlight is null) m = JournalEngine.MarkInFlight(m, id, JournalStep.RelinkLyric);
@@ -197,6 +225,9 @@ internal static class M18Specs
                     var bind = m.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
                     w.InsertLyric(next.NewTrackFileId!.Value, bind.RelativePath);
                     break;
+                case RecoveryAction.RecordOriginalRebase:
+                    m = JournalEngine.RecordOriginalRebase(m, id, next.NewTrackFileId!.Value);
+                    break;
                 case RecoveryAction.CompleteOperation:
                     m = JournalEngine.Complete(m);
                     break;
@@ -208,7 +239,7 @@ internal static class M18Specs
         }
     }
 
-    private static void FinalStateHolds(World w, string when)
+    private static void FinalStateHolds(World w, string when, int lyricRows = 2)
     {
         Eq(Artist + "/01.mp3", w.Rows[w.Links[1]], $"{when}: track 1 linked at its destination");
         Eq(C('b', 120), w.Files[Artist + "/01.mp3"], $"{when}: track 1 holds the incoming bytes");
@@ -219,7 +250,7 @@ internal static class M18Specs
         Eq(C('d', 11), w.Files[Artist + "/02.lrc"], $"{when}: lyric 2 bytes (the unselected track's)");
         Eq(1, w.Lyrics.Count(l => l.RelativePath == "01.lrc" && l.TrackFileId == w.Links[1]), $"{when}: lyric 1 registered once to the CURRENT row");
         Eq(1, w.Lyrics.Count(l => l.RelativePath == "02.lrc" && l.TrackFileId == w.Links[2]), $"{when}: lyric 2 registered once to the CURRENT row");
-        Eq(2, w.Lyrics.Count, $"{when}: no extra lyric rows");
+        Eq(lyricRows, w.Lyrics.Count, $"{when}: no extra lyric rows");
     }
 
     // ---------- specs ----------
@@ -377,6 +408,87 @@ internal static class M18Specs
         unrelated.Rows[700] = "/m18/library/foreign/01.mp3";
         var (_, unrelatedVerdict, unrelatedLast) = Drive(JournalEngine.Begin(Binding()), unrelated);
         Eq(Verdict.Completed, unrelatedVerdict, "unrelated sharing, TrackFileId=0 and dangling foreign links do not block: " + string.Join("; ", unrelatedLast.Blockers));
+    }
+
+    private static readonly (int Track, string Path)[] AlbumAudioTwo = AlbumAudio.Append((4, Artist + "/04.mp3")).ToArray();
+
+    /// <summary>M19: crash in upgrade 1; the rescan replaces the unstarted upgrade 4's row and recycles its lyric.</summary>
+    public static void RescanRebaseOfUnstartedUpgrade()
+    {
+        var w = new World(secondUpgrade: true);
+        var (m, _, _) = Drive(JournalEngine.Begin(BindingTwoUpgrades()), w, crashInside: "upgrade");
+        Eq(TrackPhase.BackupVerified, m.ProgressFor(4).Phase, "track 4 unstarted at the crash");
+        w.CascadeRescan(AlbumAudioTwo);
+        True(w.Links[4] != 14 && !w.Files.ContainsKey(Artist + "/04.lrc"), "cascade replaced track 4's row and recycled its registered lyric");
+        var digest = m.BindingDigest;
+        var (done, verdict, last) = Drive(m, w);
+        Eq(Verdict.Completed, verdict, "an unambiguous rescan of an unstarted upgrade is re-identified and the album completes: " + string.Join("; ", last.Blockers));
+        Eq(14, done.BindingFor(4).OriginalTrackFileId, "the immutable binding keeps the original ID");
+        Eq(digest, done.BindingDigest, "binding digest unchanged");
+        True(done.ProgressFor(4).ObservedOriginalTrackFileId is > 0, "the rescanned row is recorded as observation evidence");
+        Eq(C('8', 120), w.Files[Artist + "/04.mp3"], "track 4 upgraded");
+        Eq(1, w.Lyrics.Count(l => l.RelativePath == "04.lrc" && l.TrackFileId == w.Links[4]), "track 4's recycled lyric restored and registered to its fresh row");
+        Eq(C('9', 12), w.Files[Artist + "/04.lrc"], "lyric 4 bytes");
+        FinalStateHolds(w, "two upgrades after cascade", 3);
+        Eq(Verdict.Completed, Reconciler.Reconcile(done, w.Host(), w.Fs(done.Binding)).Verdict, "replay");
+        var text = JournalCodec.Encode(done);
+        Eq(text, JournalCodec.Encode(JournalCodec.Decode(text, Op, digest).Manifest!), "v4 round trip with rebase evidence");
+        Throws(() => JournalEngine.RecordOriginalRebase(JournalEngine.Begin(BindingTwoUpgrades()), 4, 11), "rebase onto another bound original is refused");
+    }
+
+    /// <summary>M19: the rescanned row of the unstarted upgrade is ALSO linked by a foreign album: no rebase, review, salvage only.</summary>
+    public static void AmbiguousRebaseSalvage()
+    {
+        var w = new World(secondUpgrade: true);
+        var (m, _, _) = Drive(JournalEngine.Begin(BindingTwoUpgrades()), w, crashInside: "upgrade");
+        w.CascadeRescan(AlbumAudioTwo);
+        w.Foreign.Add(new HostTrack(700, Rec(700), w.Links[4]));
+        var r = Reconciler.Reconcile(m, w.Host(), w.Fs(m.Binding));
+        Eq(Verdict.RequiresReview, r.Verdict, "ambiguous rescanned row: review, never a silent upgrade");
+        True(r.Next?.Action != RecoveryAction.RecordOriginalRebase, "no rebase evidence recorded for an ambiguous row");
+        var reviewed = JournalEngine.MarkReview(m, r.Next?.Reason ?? "ambiguous");
+        // Protective salvage loop (as the plugin executes it): lyric-only, one action at a time, fresh plan each time.
+        for (var i = 0; i < 20; i++)
+        {
+            var plan = Reconciler.Salvage(reviewed, w.Host(), w.Fs(reviewed.Binding));
+            True(plan.Applicable, "salvage preconditions: " + string.Join("; ", plan.Reasons));
+            var next = plan.Actions.FirstOrDefault();
+            if (next is null) break;
+            var lyric = reviewed.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
+            if (next.Action == RecoveryAction.RestoreAlbumLyric) { True(!w.Files.ContainsKey(lyric.Path), "no overwrite"); w.Files[lyric.Path] = w.Files[lyric.BackupPath]; }
+            else w.InsertLyric(next.NewTrackFileId!.Value, lyric.RelativePath);
+        }
+
+        Eq(C('9', 12), w.Files[Artist + "/04.lrc"], "track 4's lyric bytes restored");
+        Eq(0, w.Lyrics.Count(l => l.RelativePath == "04.lrc"), "track 4's lyric NOT registered to the ambiguous row");
+        Eq(1, w.Lyrics.Count(l => l.RelativePath == "02.lrc" && l.TrackFileId == w.Links[2]), "kept FLAC's lyric registered to its verified current row");
+        Eq(1, w.Lyrics.Count(l => l.RelativePath == "01.lrc" && l.TrackFileId == w.Links[1]), "upgraded track 1's lyric registered to its verified current row");
+        Eq(C('7', 100), w.Files[Artist + "/04.mp3"], "unstarted track 4 audio untouched");
+        True(!Reconciler.AlbumConsistency(reviewed, w.Host(), w.Fs(reviewed.Binding)).IsEmpty, "resolution refused while track 4 is ambiguous");
+        w.Foreign.Clear();
+        var plan2 = Reconciler.Salvage(reviewed, w.Host(), w.Fs(reviewed.Binding));
+        Eq(RecoveryAction.BindAlbumLyric, plan2.Actions.Single().Action, "after the alias is removed, the last lyric can be bound");
+        w.InsertLyric(plan2.Actions[0].NewTrackFileId!.Value, "04.lrc");
+        Eq(0, Reconciler.AlbumConsistency(reviewed, w.Host(), w.Fs(reviewed.Binding)).Length, "resolution allowed: every audio file and lyric verified and linked");
+        Eq(Verdict.RequiresReview, Reconciler.Reconcile(reviewed, w.Host(), w.Fs(reviewed.Binding)).Verdict, "the journal itself stays sticky RequiresReview");
+    }
+
+    /// <summary>M19: crash after the stock row insert and before SetFileIds: operator-approved link, never automatic.</summary>
+    public static void PostRowPreLink()
+    {
+        foreach (var where in new[] { "upgrade-row", "add-row" })
+        {
+            var w = new World();
+            var (m, _, _) = Drive(JournalEngine.Begin(Binding()), w, crashInside: where);
+            var r = Reconciler.Reconcile(m, w.Host(), w.Fs(m.Binding));
+            Eq(Verdict.OperatorApprovalRequired, r.Verdict, where + ": row without link");
+            Eq(RecoveryAction.LinkPlacedRow, r.Next!.Action, where + ": proposal");
+            var track = r.Next.TrackId!.Value;
+            w.Links[track] = r.Next.NewTrackFileId!.Value;
+            var (_, verdict, last) = Drive(m, w);
+            Eq(Verdict.Completed, verdict, where + ": completes after the approved link: " + string.Join("; ", last.Blockers));
+            FinalStateHolds(w, where);
+        }
     }
 
     public static void ReattachOnlyWhenAudioLinked()

@@ -92,7 +92,19 @@ public enum RecoveryAction
 
     /// <summary>M18: register an album lyric (fresh row) to its track's CURRENT track file.</summary>
     BindAlbumLyric = 15,
+
+    /// <summary>M19: record (journal only) that a host rescan replaced an unstarted replacement's original row.</summary>
+    RecordOriginalRebase = 16,
+
+    /// <summary>M19: link the track to the row the host inserted before it crashed (operator approval only).</summary>
+    LinkPlacedRow = 17,
 }
+
+/// <summary>
+/// M19 protective salvage: lyric-only, no-overwrite, hash-exact actions that are safe even while the audio operation
+/// is blocked for review. <see cref="Applicable"/> is false when the album, edition, artist root or paths are ambiguous.
+/// </summary>
+public sealed record SalvagePlan(bool Applicable, ImmutableArray<string> Reasons, ImmutableArray<NextAction> Actions, ImmutableArray<string> Skipped);
 
 public enum ActionMode
 {
@@ -133,6 +145,33 @@ public static class Reconciler
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(fs);
+        if (manifest.Status == OperationStatus.Active && host.Obtained && fs.Available && !host.Tracks.IsDefault && !host.TrackFiles.IsDefault)
+        {
+            // M19: a host rescan may have replaced the rows of replacements that never started. Re-identify each by
+            // path + exact bytes + its track + no other owner, then check the WHOLE operation as if that evidence were
+            // recorded. Only if everything is consistent is the evidence recorded (journal only, binding unchanged).
+            var rebases = RebaseCandidates(manifest, host, fs);
+            if (rebases.Count > 0)
+            {
+                var view = manifest with
+                {
+                    Progress = manifest.Progress.Select(p => rebases.TryGetValue(p.TrackId, out var id) ? p with { ObservedOriginalTrackFileId = id } : p).ToImmutableArray(),
+                };
+                var checkedView = ReconcileCore(view, host, fs);
+                if (checkedView.Verdict == Verdict.RequiresReview) return checkedView;
+                var first = rebases.First();
+                return new Reconciliation(Verdict.Proceed,
+                    new NextAction(first.Key, RecoveryAction.RecordOriginalRebase, ActionMode.Automatic,
+                        "a host rescan replaced the original row of an unstarted replacement (same track, path and bytes; no other owner)", first.Value),
+                    ImmutableArray<string>.Empty, checkedView.Tracks);
+            }
+        }
+
+        return ReconcileCore(manifest, host, fs);
+    }
+
+    private static Reconciliation ReconcileCore(OperationManifest manifest, HostSnapshot host, FilesystemSnapshot fs)
+    {
         var b = manifest.Binding;
 
         if (manifest.Status == OperationStatus.Completed)
@@ -191,7 +230,12 @@ public static class Reconciler
             return new Reconciliation(Verdict.RequiresReview, record, blockers.ToImmutableArray(), decisions.ToImmutableArray());
         }
 
-        var next = inFlightAction ?? NextNormalAction(manifest, host, lyricActions);
+        // M19: restoring an UNREGISTERED lyric file is non-destructive (stock recycles only registered extras), so any
+        // lyric a scan recycled is put back from its verified backup as early as possible. Registration still waits.
+        NextAction? salvageRestore = null;
+        if (manifest.Status == OperationStatus.Active && !manifest.AnyInFlight)
+            salvageRestore = Salvage(manifest, host, fs).Actions.FirstOrDefault(a => a.Action == RecoveryAction.RestoreAlbumLyric);
+        var next = inFlightAction ?? salvageRestore ?? NextNormalAction(manifest, host, lyricActions);
         if (manifest.Status == OperationStatus.RequiresReview)
         {
             // Sticky: report the proposal for an operator, but nothing runs automatically.
@@ -247,7 +291,7 @@ public static class Reconciler
             var hostTrack = host.Tracks.IsDefault ? null : host.Tracks.SingleOrDefault(t => t.TrackId == track.TrackId);
             if (hostTrack is null) blockers.Add($"track {track.TrackId} missing from host");
             else if (!string.Equals(hostTrack.RecordingMbid, track.RecordingMbid, StringComparison.Ordinal)) blockers.Add($"track {track.TrackId} recording identity changed");
-            else if (hostTrack.TrackFileId != 0 && hostTrack.TrackFileId != track.OriginalTrackFileId && Row(host, hostTrack.TrackFileId) is null)
+            else if (hostTrack.TrackFileId != 0 && hostTrack.TrackFileId != Orig(m, track) && Row(host, hostTrack.TrackFileId) is null)
                 blockers.Add($"track {track.TrackId}: dangling track-file link {hostTrack.TrackFileId} (stale nonzero ID)");
 
             // Any extra lyric (or other sidecar row) linked to the original file would be recycled
@@ -255,7 +299,7 @@ public static class Reconciler
             var phase = m.ProgressFor(track.TrackId).Phase;
             if (phase < TrackPhase.Upgraded && !host.Lyrics.IsDefault)
             {
-                var linked = host.Lyrics.Where(l => l.TrackFileId == track.OriginalTrackFileId).ToList();
+                var linked = host.Lyrics.Where(l => l.TrackFileId == Orig(m, track)).ToList();
                 if (linked.Any(l => track.Lyric is null || l.LyricFileId != track.Lyric.LyricFileId))
                     blockers.Add($"track {track.TrackId}: an unbound lyric row is linked to the original track file");
             }
@@ -265,7 +309,7 @@ public static class Reconciler
             if (beforeNative && !host.TrackFiles.IsDefault)
             {
                 // Before the native step, the ONLY row allowed at the original or destination path is the bound original.
-                if (host.TrackFiles.Any(f => f.TrackFileId != track.OriginalTrackFileId &&
+                if (host.TrackFiles.Any(f => f.TrackFileId != Orig(m, track) &&
                         (string.Equals(f.Path, track.OriginalPath, StringComparison.OrdinalIgnoreCase) || string.Equals(f.Path, track.DestinationPath, StringComparison.OrdinalIgnoreCase))))
                     blockers.Add($"track {track.TrackId}: another track-file row refers to the original or destination path");
             }
@@ -273,7 +317,7 @@ public static class Reconciler
             // The stock upgrader deletes the linked file for every track it touches; a bound original
             // shared with any other track would orphan that track.
             if (progress.Phase < TrackPhase.Upgraded && !host.Tracks.IsDefault &&
-                host.Tracks.Any(x => x.TrackId != track.TrackId && x.TrackFileId == track.OriginalTrackFileId))
+                host.Tracks.Any(x => x.TrackId != track.TrackId && x.TrackFileId == Orig(m, track)))
                 blockers.Add($"track {track.TrackId}: the original track file is linked to another track");
 
             // Per-track isolation also covers every row the operation creates or relies on: the recorded
@@ -285,11 +329,11 @@ public static class Reconciler
                 var operationRows = new HashSet<int>();
                 if (progress.NewTrackFileId is { } fresh) operationRows.Add(fresh);
                 // M18: after the upgrade the track's CURRENT row is the operation's row even when a host scan replaced it.
-                if (progress.Phase >= TrackPhase.Upgraded && hostTrack is { TrackFileId: > 0 } && hostTrack.TrackFileId != track.OriginalTrackFileId)
+                if (progress.Phase >= TrackPhase.Upgraded && hostTrack is { TrackFileId: > 0 } && hostTrack.TrackFileId != Orig(m, track))
                     operationRows.Add(hostTrack.TrackFileId);
                 if (progress.InFlight == JournalStep.NativeUpgrade)
                 {
-                    foreach (var row in host.TrackFiles.Where(f => f.TrackFileId != track.OriginalTrackFileId &&
+                    foreach (var row in host.TrackFiles.Where(f => f.TrackFileId != Orig(m, track) &&
                                  (string.Equals(f.Path, track.DestinationPath, StringComparison.OrdinalIgnoreCase) ||
                                   string.Equals(f.Path, track.OriginalPath, StringComparison.OrdinalIgnoreCase))))
                         operationRows.Add(row.TrackFileId);
@@ -299,7 +343,7 @@ public static class Reconciler
                     blockers.Add($"track {track.TrackId}: a track-file row created by this operation is linked to another track");
             }
 
-            var original = Row(host, track.OriginalTrackFileId);
+            var original = Row(host, Orig(m, track));
             if (original is not null && !PathCanonicalizer.PathsEqual(original.Path, track.OriginalPath, b.PathStyle))
                 blockers.Add($"track {track.TrackId}: original track-file ID now refers to a different path (stale or reused ID)");
         }
@@ -319,15 +363,19 @@ public static class Reconciler
         var d = fs.Files[t.DestinationPath];
         var i = fs.Files[t.IncomingPath];
         var sameDestination = PathCanonicalizer.PathsEqual(t.OriginalPath, t.DestinationPath, style);
-        var originalRow = Row(host, t.OriginalTrackFileId);
-        var linkedToOriginal = hostTrack.TrackFileId == t.OriginalTrackFileId;
+        var originalRow = Row(host, Orig(m, t));
+        var linkedToOriginal = hostTrack.TrackFileId == Orig(m, t);
         var backupOk = fs.Files[t.BackupAudioPath].Is(t.Original) && (t.Lyric is null || fs.Files[t.Lyric.BackupPath].Is(t.Lyric.Content));
         var lyricObservation = t.Lyric is null ? null : fs.Files[t.Lyric.Path];
         var albumOwnsLyric = t.Lyric is not null && m.Binding.AlbumLyrics.Any(l => l.LyricFileId == t.Lyric.LyricFileId);
         // Different bytes always block. Missing bytes are explained only after the track's lyric was relinked and only
         // when the album-wide binding (with its own verified backup) owns the lyric's final state.
+        var albumLyric = t.Lyric is null ? null : m.Binding.AlbumLyrics.FirstOrDefault(l => l.LyricFileId == t.Lyric.LyricFileId);
+        // M19: a missing lyric that is unregistered and has a verified album backup is awaiting the salvage restore.
+        var awaitingRestore = lyricObservation is { Exists: false } && albumLyric is not null && fs.Files[albumLyric.BackupPath].Is(albumLyric.Content) &&
+            !host.Lyrics.Any(l => string.Equals(l.RelativePath, t.Lyric!.RelativePath, StringComparison.OrdinalIgnoreCase));
         var lyricBytesOk = lyricObservation is null || lyricObservation.Is(t.Lyric!.Content) ||
-            (!lyricObservation.Exists && p.Phase == TrackPhase.LyricRelinked && albumOwnsLyric);
+            (!lyricObservation.Exists && ((p.Phase == TrackPhase.LyricRelinked && albumOwnsLyric) || awaitingRestore));
         var originalLyricRow = t.Lyric is null || host.Lyrics.IsDefault ? null : host.Lyrics.SingleOrDefault(l => l.LyricFileId == t.Lyric.LyricFileId);
         var destinationFree = sameDestination || !d.Exists;
         var incomingStaged = i.Is(t.Incoming);
@@ -340,7 +388,10 @@ public static class Reconciler
         // Lyric row expectations before the native step.
         if (t.Lyric is not null && p.Phase <= TrackPhase.BackupVerified && p.InFlight != JournalStep.DetachLyric)
         {
-            if (originalLyricRow is null || originalLyricRow.TrackFileId != t.OriginalTrackFileId || originalLyricRow.RelativePath != t.Lyric.RelativePath)
+            // M19: after a recorded rebase the host rescan already removed (and recycled) the lyric row; the album
+            // backup owns the bytes and the detach step only records that observation.
+            var removedByRescan = p.ObservedOriginalTrackFileId is not null && originalLyricRow is null && albumOwnsLyric;
+            if (!removedByRescan && (originalLyricRow is null || originalLyricRow.TrackFileId != Orig(m, t) || originalLyricRow.RelativePath != t.Lyric.RelativePath))
                 return Bad("registered lyric row missing or relinked before detach");
         }
 
@@ -361,7 +412,7 @@ public static class Reconciler
                 if (p.InFlight == JournalStep.DetachLyric)
                 {
                     if (originalLyricRow is not null)
-                        return originalLyricRow.TrackFileId == t.OriginalTrackFileId
+                        return originalLyricRow.TrackFileId == Orig(m, t)
                             ? (TrackCondition.BackupVerified, Auto(RecoveryAction.DetachLyric, "resume interrupted lyric detach"), reasons)
                             : Bad("lyric row relinked elsewhere during detach");
                     return (TrackCondition.LyricDetached, Auto(RecoveryAction.RecordStepDone, "lyric row observed removed and bytes intact"), reasons);
@@ -382,7 +433,7 @@ public static class Reconciler
                 // every TrackFile ID changes across the cascade). Identity is the track's current link to a row at
                 // the destination holding the incoming bytes; the stored ID is only the first observation.
                 var newRow = Row(host, hostTrack.TrackFileId);
-                if (newRow is null || hostTrack.TrackFileId == t.OriginalTrackFileId || !PathCanonicalizer.PathsEqual(newRow.Path, t.DestinationPath, style))
+                if (newRow is null || hostTrack.TrackFileId == Orig(m, t) || !PathCanonicalizer.PathsEqual(newRow.Path, t.DestinationPath, style))
                     return Bad("recorded fresh track-file row is missing or not linked");
                 if (!d.Is(t.Incoming)) return Bad("upgraded destination bytes differ from the bound incoming content");
                 if (originalRow is not null) return Bad("original track-file row reappeared after upgrade");
@@ -423,10 +474,10 @@ public static class Reconciler
             var d = fs.Files[t.DestinationPath];
             var i = fs.Files[t.IncomingPath];
             var same = PathCanonicalizer.PathsEqual(t.OriginalPath, t.DestinationPath, style);
-            var originalRow = Row(host, t.OriginalTrackFileId);
-            var destinationRows = host.TrackFiles.Where(f => PathCanonicalizer.PathsEqual(f.Path, t.DestinationPath, style) && f.TrackFileId != t.OriginalTrackFileId).ToList();
-            var originalPathRows = host.TrackFiles.Where(f => PathCanonicalizer.PathsEqual(f.Path, t.OriginalPath, style) && f.TrackFileId != t.OriginalTrackFileId).ToList();
-            var linkOrig = hostTrack.TrackFileId == t.OriginalTrackFileId;
+            var originalRow = Row(host, Orig(m, t));
+            var destinationRows = host.TrackFiles.Where(f => PathCanonicalizer.PathsEqual(f.Path, t.DestinationPath, style) && f.TrackFileId != Orig(m, t)).ToList();
+            var originalPathRows = host.TrackFiles.Where(f => PathCanonicalizer.PathsEqual(f.Path, t.OriginalPath, style) && f.TrackFileId != Orig(m, t)).ToList();
+            var linkOrig = hostTrack.TrackFileId == Orig(m, t);
             var linkMissingOrOrphan = hostTrack.TrackFileId == 0 || (linkOrig && originalRow is null);
             var lyricRows = t.Lyric is null ? new List<HostLyric>() : host.Lyrics.Where(l => l.RelativePath == t.Lyric.RelativePath).ToList();
 
@@ -472,6 +523,12 @@ public static class Reconciler
                 if (originalAtOriginal && (same || !d.Exists))
                     return (TrackCondition.OrphanedOriginalBytesRestored, Operator(RecoveryAction.InsertFreshTrackFileForOriginal, "host row deleted: insert a FRESH track-file row for the restored original and relink the track"), reasons);
             }
+
+            // D2 (M19). The host inserted the fresh row but crashed before linking the track (AddMany, then SetFileIds).
+            if (incomingAtDestination && !i.Exists && originalRow is null && hostTrack.TrackFileId == 0 && destinationRows.Count == 1 &&
+                !host.Tracks.Any(x => x.TrackFileId == destinationRows[0].TrackFileId))
+                return (TrackCondition.IncomingPlacedUnlinked, new NextAction(t.TrackId, RecoveryAction.LinkPlacedRow, ActionMode.OperatorApproval,
+                    "row inserted but the track was never linked (crash between the stock row insert and SetFileIds): link the track to that row", destinationRows[0].TrackFileId), reasons);
 
             // D. Incoming placed but never linked (crash before the host inserted the new row).
             if (incomingAtDestination && !i.Exists && originalRow is null && linkMissingOrOrphan && destinationRows.Count == 0)
@@ -551,6 +608,8 @@ public static class Reconciler
                 blockers.Add($"album lyric {l.RelativePath}: physical lyric bytes differ from the backed-up lyric; unrelated bytes occupy the lyric path, refusing to overwrite");
             else if (!observed.Exists && !fs.Files[l.BackupPath].Is(l.Content))
                 blockers.Add($"album lyric {l.RelativePath}: lyric missing and backup unverifiable");
+            else if (!fs.Files[l.BackupPath].Is(l.Content))
+                blockers.Add($"album lyric {l.RelativePath}: album backup unverifiable (every backup is verified before any further destructive step)");
             if (rows.Any(x => x.TrackFileId == 0 || Row(host, x.TrackFileId) is null))
                 blockers.Add($"album lyric {l.RelativePath}: stale lyric row points at a track file that no longer exists");
             else if (!observed.Exists && rows.Count > 0)
@@ -591,6 +650,9 @@ public static class Reconciler
             return (TrackCondition.Added, Auto(RecoveryAction.RecordStepDone, "native add observed complete", destinationRows[0].TrackFileId), reasons);
         if (hostTrack.TrackFileId == 0 && !d.Exists && destinationRows.Count == 0 && i.Is(a.Incoming))
             return (TrackCondition.AddNotStarted, Auto(RecoveryAction.AbandonStep, "native add observably not started"), reasons);
+        if (d.Is(a.Incoming) && !i.Exists && destinationRows.Count == 1 && hostTrack.TrackFileId == 0 && !host.Tracks.Any(x => x.TrackFileId == destinationRows[0].TrackFileId))
+            return (TrackCondition.AddPlacedUnlinked, new NextAction(a.TrackId, RecoveryAction.LinkPlacedRow, ActionMode.OperatorApproval,
+                "row inserted but the track was never linked (crash between the stock row insert and SetFileIds): link the track to that row", destinationRows[0].TrackFileId), reasons);
         if (d.Is(a.Incoming) && !i.Exists && destinationRows.Count == 0 && hostTrack.TrackFileId == 0)
             return (TrackCondition.AddPlacedUnlinked, new NextAction(a.TrackId, RecoveryAction.InsertFreshTrackFileForIncoming, ActionMode.OperatorApproval,
                 "incoming placed without a row (crash between the native move and the row insert): register the placed file and link the track"), reasons);
@@ -628,6 +690,158 @@ public static class Reconciler
                 "register the lyric to its track's current file", current.TrackFileId, AlbumLyricId: l.LyricFileId), reasons);
         if (rows.Count == 1 && rows[0].TrackFileId == current.TrackFileId) return (TrackCondition.LyricSettled, null, reasons);
         return Bad("conflicting or stale lyric row");
+    }
+
+    private static int Orig(OperationManifest m, TrackBinding t) => JournalEngine.EffectiveOriginal(m, t);
+
+    /// <summary>
+    /// M19: unstarted replacements whose current original row was replaced by a host rescan. Every condition must hold:
+    /// no step in flight for the track, the recorded original row is gone, the track is linked to exactly one other row
+    /// at the ORIGINAL path, the original bytes are unchanged there, no other track (any album) links that row, no other
+    /// row shares the path, and the row ID is not used by any other binding.
+    /// </summary>
+    public static ImmutableSortedDictionary<int, int> RebaseCandidates(OperationManifest m, HostSnapshot host, FilesystemSnapshot fs)
+    {
+        var result = ImmutableSortedDictionary.CreateBuilder<int, int>();
+        if (host.Tracks.IsDefault || host.TrackFiles.IsDefault) return result.ToImmutable();
+        var style = m.Binding.PathStyle;
+        foreach (var t in m.Binding.Tracks)
+        {
+            var p = m.ProgressFor(t.TrackId);
+            if (p.InFlight is not null || p.Phase >= TrackPhase.Upgraded || Row(host, Orig(m, t)) is not null) continue;
+            var hostTracks = host.Tracks.Where(x => x.TrackId == t.TrackId).ToList();
+            if (hostTracks.Count != 1 || !string.Equals(hostTracks[0].RecordingMbid, t.RecordingMbid, StringComparison.Ordinal)) continue;
+            var id = hostTracks[0].TrackFileId;
+            var row = id > 0 ? Row(host, id) : null;
+            if (row is null || !PathCanonicalizer.PathsEqual(row.Path, t.OriginalPath, style)) continue;
+            if (!fs.Files.TryGetValue(t.OriginalPath, out var original) || !original.Is(t.Original)) continue;
+            if (host.Tracks.Count(x => x.TrackFileId == id) != 1) continue;
+            if (host.TrackFiles.Count(f => string.Equals(f.Path, t.OriginalPath, StringComparison.OrdinalIgnoreCase) ||
+                                           string.Equals(f.Path, t.DestinationPath, StringComparison.OrdinalIgnoreCase)) != 1) continue;
+            var used = m.Binding.Tracks.Any(o => o.TrackId != t.TrackId && (o.OriginalTrackFileId == id || m.ProgressFor(o.TrackId).ObservedOriginalTrackFileId == id)) ||
+                m.Binding.Kept.Any(k => k.TrackFileId == id) || m.Progress.Any(o => o.NewTrackFileId == id) || m.Additions.Any(a => a.NewTrackFileId == id) ||
+                result.Values.Contains(id);
+            if (!used) result[t.TrackId] = id;
+        }
+
+        return result.ToImmutable();
+    }
+
+    /// <summary>Audio a bound track may legitimately be linked to right now: (path, bytes) pairs.</summary>
+    private static IEnumerable<(string Path, ContentId Content)> AcceptableAudio(OperationManifest m, int trackId)
+    {
+        var upgrade = m.Binding.Tracks.FirstOrDefault(t => t.TrackId == trackId);
+        if (upgrade is not null)
+        {
+            yield return (upgrade.DestinationPath, upgrade.Incoming);
+            yield return (upgrade.OriginalPath, upgrade.Original);
+        }
+
+        foreach (var k in m.Binding.Kept.Where(k => k.TrackId == trackId)) yield return (k.Path, k.Content);
+        foreach (var a in m.Binding.Additions.Where(a => a.TrackId == trackId)) yield return (a.DestinationPath, a.Incoming);
+    }
+
+    /// <summary>The track's current row when it is verified (acceptable path, exact bytes, no other owner anywhere), else null.</summary>
+    private static HostTrackFile? VerifiedCurrent(OperationManifest m, int trackId, HostSnapshot host, FilesystemSnapshot fs)
+    {
+        var tracks = host.Tracks.Where(x => x.TrackId == trackId).ToList();
+        if (tracks.Count != 1 || tracks[0].TrackFileId <= 0) return null;
+        var row = Row(host, tracks[0].TrackFileId);
+        if (row is null || host.Tracks.Count(x => x.TrackFileId == row.TrackFileId) != 1) return null;
+        if (host.TrackFiles.Count(f => string.Equals(f.Path, row.Path, StringComparison.OrdinalIgnoreCase)) != 1) return null;
+        return AcceptableAudio(m, trackId).Any(a => PathCanonicalizer.PathsEqual(row.Path, a.Path, m.Binding.PathStyle) && fs.Files.TryGetValue(a.Path, out var o) && o.Is(a.Content))
+            ? row : null;
+    }
+
+    private static ImmutableArray<string> SalvagePreconditions(OperationManifest m, HostSnapshot host, FilesystemSnapshot fs)
+    {
+        var b = m.Binding;
+        var reasons = new List<string>();
+        if (!host.Obtained || host.Tracks.IsDefault || host.TrackFiles.IsDefault || host.Lyrics.IsDefault) reasons.Add("fresh host data could not be obtained");
+        if (!fs.Available || fs.Files is null) reasons.Add("filesystem or mount unavailable");
+        if (reasons.Count > 0) return reasons.ToImmutableArray();
+        if (host.AlbumId != b.AlbumId) reasons.Add("album identity differs");
+        if (!string.Equals(host.ArtistPath, b.ArtistRoot, StringComparison.Ordinal)) reasons.Add("artist root differs (lyric identity cannot be established)");
+        var monitored = host.Releases.IsDefault ? new List<HostRelease>() : host.Releases.Where(r => r.Monitored).ToList();
+        if (monitored.Count != 1 || monitored[0].ReleaseId != b.MonitoredReleaseId || !string.Equals(monitored[0].ReleaseMbid, b.MonitoredReleaseMbid, StringComparison.Ordinal))
+            reasons.Add("monitored edition is not exactly the bound edition");
+        if (host.TrackFiles.GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1)) reasons.Add("two track-file rows share a path");
+        if (host.Lyrics.GroupBy(l => l.RelativePath, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1)) reasons.Add("two lyric rows share a relative path");
+        foreach (var path in AllBoundPaths(b))
+        {
+            if (!fs.Files!.TryGetValue(path, out var o)) reasons.Add($"no fresh observation for {path}");
+            else if (o.Escapes) reasons.Add($"path escapes its root or traverses a link: {path}");
+        }
+
+        return reasons.ToImmutableArray();
+    }
+
+    /// <summary>
+    /// M19 protective salvage, valid in ANY operation state: restore missing album lyrics from verified backups (never
+    /// overwrite) and register present ones to a VERIFIED current row. Anything ambiguous is skipped with its reason.
+    /// No audio is touched and nothing here may complete the operation.
+    /// </summary>
+    public static SalvagePlan Salvage(OperationManifest manifest, HostSnapshot host, FilesystemSnapshot fs)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        var reasons = SalvagePreconditions(manifest, host, fs);
+        if (!reasons.IsEmpty) return new SalvagePlan(false, reasons, ImmutableArray<NextAction>.Empty, ImmutableArray<string>.Empty);
+        var actions = new List<NextAction>();
+        var skipped = new List<string>();
+        foreach (var l in manifest.Binding.AlbumLyrics)
+        {
+            var observed = fs.Files[l.Path];
+            var rows = host.Lyrics.Where(x => string.Equals(x.RelativePath, l.RelativePath, StringComparison.OrdinalIgnoreCase)).ToList();
+            var current = VerifiedCurrent(manifest, l.TrackId, host, fs);
+            if (observed.Exists && !observed.Is(l.Content)) skipped.Add($"{l.RelativePath}: unrelated bytes occupy the lyric path; not overwritten");
+            else if (!observed.Exists)
+            {
+                if (rows.Count > 0) skipped.Add($"{l.RelativePath}: a lyric row is registered for the missing file");
+                else if (!fs.Files[l.BackupPath].Is(l.Content)) skipped.Add($"{l.RelativePath}: lyric missing and backup unverifiable");
+                else actions.Add(new NextAction(l.TrackId, RecoveryAction.RestoreAlbumLyric, ActionMode.Automatic, "salvage: restore the lyric from its verified album backup (no overwrite)", AlbumLyricId: l.LyricFileId));
+            }
+            else if (rows.Count == 0)
+            {
+                if (current is null) skipped.Add($"{l.RelativePath}: no unambiguous verified current file for track {l.TrackId}; left unregistered");
+                else actions.Add(new NextAction(l.TrackId, RecoveryAction.BindAlbumLyric, ActionMode.Automatic, "salvage: register the lyric to its track's verified current file", current.TrackFileId, AlbumLyricId: l.LyricFileId));
+            }
+            else if (!(rows.Count == 1 && current is not null && rows[0].TrackFileId == current.TrackFileId))
+                skipped.Add($"{l.RelativePath}: registered to a row that is not the track's verified current file");
+        }
+
+        return new SalvagePlan(true, ImmutableArray<string>.Empty, actions.OrderBy(a => a.Action == RecoveryAction.RestoreAlbumLyric ? 0 : 1).ToImmutableArray(), skipped.ToImmutableArray());
+    }
+
+    /// <summary>
+    /// M19 operator resolution gate: empty when every bound audio file is linked to a verified current row (or an
+    /// addition is cleanly absent) and every album lyric is present with its exact bytes and registered once to its
+    /// track's verified current row. Anything else is a reason to refuse resolution.
+    /// </summary>
+    public static ImmutableArray<string> AlbumConsistency(OperationManifest manifest, HostSnapshot host, FilesystemSnapshot fs)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        var problems = SalvagePreconditions(manifest, host, fs).ToList();
+        if (problems.Count > 0) return problems.ToImmutableArray();
+        var b = manifest.Binding;
+        foreach (var id in b.Tracks.Select(t => t.TrackId).Concat(b.Kept.Select(k => k.TrackId)))
+            if (VerifiedCurrent(manifest, id, host, fs) is null) problems.Add($"track {id}: not linked to a verified current file (acceptable path, exact bytes, sole owner)");
+        foreach (var a in b.Additions)
+        {
+            var linked = host.Tracks.Where(x => x.TrackId == a.TrackId).Select(x => x.TrackFileId).FirstOrDefault();
+            var cleanlyAbsent = linked == 0 && !fs.Files[a.DestinationPath].Exists && !host.TrackFiles.Any(f => PathCanonicalizer.PathsEqual(f.Path, a.DestinationPath, b.PathStyle));
+            if (!cleanlyAbsent && VerifiedCurrent(manifest, a.TrackId, host, fs) is null) problems.Add($"addition {a.TrackId}: neither cleanly absent nor linked to a verified current file");
+        }
+
+        foreach (var l in b.AlbumLyrics)
+        {
+            var current = VerifiedCurrent(manifest, l.TrackId, host, fs);
+            var rows = host.Lyrics.Where(x => string.Equals(x.RelativePath, l.RelativePath, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (!fs.Files[l.Path].Is(l.Content)) problems.Add($"{l.RelativePath}: lyric not physically present with its original bytes");
+            else if (current is null || rows.Count != 1 || rows[0].TrackFileId != current.TrackFileId) problems.Add($"{l.RelativePath}: not registered exactly once to its track's verified current file");
+            if (!fs.Files[l.BackupPath].Is(l.Content)) problems.Add($"{l.RelativePath}: album backup unverifiable (evidence would be lost)");
+        }
+
+        return problems.ToImmutableArray();
     }
 
     /// <summary>Every path any binding of the operation names, each observed once.</summary>
