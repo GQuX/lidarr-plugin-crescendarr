@@ -444,10 +444,21 @@ def lane_negatives(lane: Lane) -> None:
             check(state == "failed" and "outcome=RequiresReview" in text, f"{name}: sticky RequiresReview")
             check(re.search(reason, text, re.IGNORECASE) is not None, f"{name}: reason names the hazard ({reason})")
             after = lane.state(f"neg-after-{lane.boots}")
-            check(after["tracks"] == frozen["tracks"] and after["files"] == frozen["files"] and after["lyrics"] == frozen["lyrics"],
-                  f"{name}: zero TrackFile, link or lyric row changes")
-            check(files_state(lane.artist_path) == frozen_files and (lane.lyric(2).read_bytes() if lane.lyric(2).exists() else None) == frozen_lyric,
-                  f"{name}: zero library byte changes; nothing overwritten")
+            check(after["tracks"] == frozen["tracks"] and after["files"] == frozen["files"], f"{name}: zero TrackFile or link changes")
+            # M19: entering review runs the protective lyric-only salvage for OTHER, unambiguous lyrics. The hazard itself
+            # is never touched, nothing is overwritten, and every change must be one the salvage logged.
+            salvage = re.search(r"SALVAGE op=\S+ restored=\[([^\]]*)\] bound=\[([^\]]*)\]", text)
+            restored = salvage.group(1) if salvage else ""
+            bound = salvage.group(2) if salvage else ""
+            note(f"NEGATIVE_SALVAGE case={name!r} restored=[{restored}] bound=[{bound}]")
+            check(set(frozen["lyrics"]) <= set(after["lyrics"]), f"{name}: no lyric row removed")
+            check(all(row[2] in bound for row in set(after["lyrics"]) - set(frozen["lyrics"])), f"{name}: every new lyric row is a logged salvage bind")
+            changed = {k for k in set(files_state(lane.artist_path)) | set(frozen_files) if files_state(lane.artist_path).get(k) != frozen_files.get(k)}
+            check(all(k in restored and k not in frozen_files for k in changed), f"{name}: the only library byte changes are logged restores of MISSING lyrics (nothing overwritten)")
+            hazard_on_lyric2 = "dangling" not in reason
+            if hazard_on_lyric2:
+                check((lane.lyric(2).read_bytes() if lane.lyric(2).exists() else None) == frozen_lyric and lane.lyric(2).name not in restored + bound,
+                      f"{name}: the hazardous lyric was neither overwritten, restored nor registered")
             review_summary(lane, "RequiresReview")
             state, text = recover(host)
             check("RECOVERY_SKIP" in text, f"{name}: a second recovery does nothing (sticky)")
