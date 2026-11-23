@@ -229,7 +229,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var ops = Path.Combine(root, "crescendarr", "ops");
             var blocked = !Directory.Exists(ops) ? new List<string>() : Directory.GetDirectories(ops)
                 .Select(d => (Id: Path.GetFileName(d), State: CrescendarrImportExecutor.OperationState(d)))
-                .Where(o => o.State is "RequiresReview" or "OperatorApprovalRequired" or "Active")
+                .Where(o => o.State is "RequiresReview" or "OperatorApprovalRequired" or "Active" or "StorageUnavailable")
                 .Select(o => $"{o.Id} ({o.State})").ToList();
             if (blocked.Count > 0)
                 return new NzbDrone.Core.HealthCheck.HealthCheck(GetType(), HealthCheckResult.Error, HealthCheckReason.ServerNotification,
@@ -273,7 +273,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var ops = Path.Combine(root, "crescendarr", "ops");
             if (Directory.Exists(ops))
             {
-                foreach (var opRoot in Directory.GetDirectories(ops).OrderBy(d => d, StringComparer.Ordinal).Where(d => OperationState(d) is "Active" or "Unpublished"))
+                foreach (var opRoot in Directory.GetDirectories(ops).OrderBy(d => d, StringComparer.Ordinal).Where(d => OperationState(d) is "Active" or "Unpublished" or "StorageUnavailable"))
                 {
                     if (mode != CrescendarrMode.GuardedAuto)
                     {

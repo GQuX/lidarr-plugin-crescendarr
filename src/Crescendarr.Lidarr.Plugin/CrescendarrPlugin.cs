@@ -219,6 +219,82 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return false;
         }
 
+        public enum PathState
+        {
+            Absent,
+            File,
+            Directory,
+
+            /// <summary>The path could not be examined (I/O error, stale or unreachable mount, permission).</summary>
+            Error,
+        }
+
+        /// <summary>
+        /// M23: like File.Exists, but an I/O error is NOT reported as "absent". An unreachable CIFS server or a stale mount
+        /// must never look like a missing file (that would invite restores into the wrong place or false conclusions).
+        /// </summary>
+        public static PathState Probe(string path)
+        {
+            try
+            {
+                var attributes = File.GetAttributes(path);
+                return (attributes & FileAttributes.Directory) != 0 ? PathState.Directory : PathState.File;
+            }
+            catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+            {
+                return PathState.Absent;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                return PathState.Error;
+            }
+        }
+
+        /// <summary>
+        /// M23: identity of the filesystem that holds a path ("fstype|source|mountpoint" from /proc/self/mountinfo), so an
+        /// operation can tell that its library mount disappeared (and the path is now a plain local directory) or changed.
+        /// </summary>
+        public static string MountIdentity(string path)
+        {
+            if (!File.Exists("/proc/self/mountinfo")) return null;
+            var full = Path.GetFullPath(path).TrimEnd('/');
+            string best = null;
+            var bestLength = -1;
+            foreach (var line in File.ReadLines("/proc/self/mountinfo"))
+            {
+                var fields = line.Split(' ');
+                var separator = Array.IndexOf(fields, "-");
+                if (fields.Length < 5 || separator < 0 || separator + 2 >= fields.Length) continue;
+                var mountpoint = Unescape(fields[4]);
+                var prefix = mountpoint == "/" ? "/" : mountpoint.TrimEnd('/') + "/";
+                if (!(full == mountpoint.TrimEnd('/') || full.StartsWith(prefix, StringComparison.Ordinal) || mountpoint == "/")) continue;
+                if (mountpoint.Length <= bestLength) continue;
+                bestLength = mountpoint.Length;
+                best = fields[separator + 1] + "|" + Unescape(fields[separator + 2]) + "|" + mountpoint;
+            }
+
+            return best;
+        }
+
+        private static string Unescape(string value) => value.Replace("\\040", " ").Replace("\\011", "\t").Replace("\\012", "\n").Replace("\\134", "\\");
+
+        /// <summary>M23: the folder accepts a durable write and a delete right now (a read-only or failing mount does not).</summary>
+        public static string WriteProbeProblem(string folder)
+        {
+            var probe = Path.Combine(folder, ".crescendarr-write-probe-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                WriteDurable(probe, "probe\n", replace: false);
+                File.Delete(probe);
+                return Probe(probe) == PathState.Absent ? null : "the write probe could not be removed";
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                try { if (File.Exists(probe)) File.Delete(probe); } catch (Exception) { }
+                return error.GetType().Name + ": " + error.Message;
+            }
+        }
+
         /// <summary>Something (file, directory or link, even a dangling one) already occupies the path.</summary>
         public static bool Occupied(string path) => File.Exists(path) || Directory.Exists(path) || IsLink(path);
 

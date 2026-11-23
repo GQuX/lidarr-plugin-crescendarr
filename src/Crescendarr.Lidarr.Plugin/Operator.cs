@@ -47,7 +47,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     if (prepared == null)
                     {
                         var host = HostSnapshot(context.Manifest, context.Artist.Id);
-                        var fs = Observe(root, context.Manifest);
+                        var fs = Observe(context, context.Manifest);
                         problems = Reconciler.AlbumConsistency(context.Manifest, host, fs).ToList();
                         salvageActions = Reconciler.Salvage(context.Manifest, host, fs).Actions.Length;
                     }
@@ -151,7 +151,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             else
             {
                 var host = HostSnapshot(context.Manifest, context.Artist.Id);
-                var fs = Observe(context.Root, context.Manifest);
+                var fs = Observe(context, context.Manifest);
                 p.Generation = context.Manifest.Generation;
                 p.Digest = Digest(context.Manifest, host, fs);
                 switch (action)
@@ -245,7 +245,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var outcome = Path.Combine(opRoot, "outcome.json");
             if (File.Exists(outcome)) return JsonDocument.Parse(File.ReadAllText(outcome)).RootElement.GetProperty("outcome").GetString();
             var review = Path.Combine(opRoot, "review.json");
-            if (File.Exists(review) && JsonDocument.Parse(File.ReadAllText(review)).RootElement.GetProperty("status").GetString() == OperatorApprovalRequired) return OperatorApprovalRequired;
+            if (File.Exists(review) && JsonDocument.Parse(File.ReadAllText(review)).RootElement.GetProperty("status").GetString() is OperatorApprovalRequired or StorageUnavailable)
+                return JsonDocument.Parse(File.ReadAllText(review)).RootElement.GetProperty("status").GetString();
             return File.Exists(Path.Combine(opRoot, "journal.json")) ? "Active" : "Unpublished";
         }
 

@@ -64,6 +64,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         public string ArtistMbid;
         public string Staging;
         public OperationManifest Manifest;
+        public string LibraryIdentity;
+        public string StorageProblem;
         public List<string> Salvaged = new List<string>();
         public List<string> SalvageSkipped = new List<string>();
         public NextAction Proposal;
@@ -79,6 +81,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         private const string OperatorApprovalRequired = "OperatorApprovalRequired";
         private const string Abandoned = "Abandoned";
         private const string Refused = "Refused";
+
+        /// <summary>M23: transient, NOT terminal: the library storage was unreachable, unmounted or changed. Nothing was concluded.</summary>
+        private const string StorageUnavailable = "StorageUnavailable";
 
         private readonly HostAdapter _adapter;
         private readonly IRootFolderService _rootFolders;
@@ -201,7 +206,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var context = new OperationContext
             {
                 Root = root, OperationId = operationId, OperationRoot = opRoot, Artist = staged.Artist, Album = staged.Album,
-                ArtistMbid = staged.Artist.Metadata.Value.ForeignArtistId, Staging = staging
+                ArtistMbid = staged.Artist.Metadata.Value.ForeignArtistId, Staging = staging, LibraryIdentity = Disk.MountIdentity(staged.Artist.Path)
             };
             var artistRoot = staged.Artist.Path.TrimEnd('/');
             var upgrades = new List<TrackBinding>();
@@ -263,6 +268,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 operationId, planId = plan.PlanId, downloadId = item.DownloadId, clientId, staging, downloadFolder = observed.Folder,
                 candidates = observed.IncomingSha,
                 artistId = staged.Artist.Id, albumId = staged.Album.Id, artistMbid = staged.Artist.Metadata.Value.ForeignArtistId,
+                storage = new { library = Disk.MountIdentity(artistRoot), operations = Disk.MountIdentity(opRoot) },
                 additions = additions.Select(a => new { a.TrackId, a.DestinationPath }).ToList(),
                 kept = kept.Select(k => new { k.TrackId, k.TrackFileId, k.Path }).ToList()
             }), replace: false);
@@ -369,6 +375,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             context.Album = _albums.GetAlbum(operation.GetProperty("albumId").GetInt32());
             context.Artist = _artists.GetArtist(operation.GetProperty("artistId").GetInt32());
             context.ArtistMbid = operation.GetProperty("artistMbid").GetString();
+            if (operation.TryGetProperty("storage", out var storage) && storage.TryGetProperty("library", out var library) && library.ValueKind == JsonValueKind.String)
+                context.LibraryIdentity = library.GetString();
             var downloadFolder = operation.GetProperty("downloadFolder").GetString();
             var candidates = operation.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
             context.LoadStagedDecisions = () => RefillAndDecide(context, downloadFolder, candidates);
@@ -449,7 +457,14 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     return Review("artist MusicBrainz identity changed");
 
                 var host = HostSnapshot(manifest, context.Artist.Id);
-                var fs = Observe(context.Root, manifest);
+                var fs = Observe(context, manifest);
+                if (!fs.Available)
+                {
+                    // M23: an unreachable, unmounted or changed library proves nothing. Do not review, salvage or write.
+                    CrescendarrGuard.Emit(_logger, $"STORAGE_UNAVAILABLE op={context.OperationId} {context.StorageProblem}");
+                    return StorageUnavailable + ":" + context.StorageProblem;
+                }
+
                 var verdict = Reconciler.Reconcile(manifest, host, fs);
                 var next = verdict.Next;
                 CrescendarrGuard.Emit(_logger, $"JOURNAL gen={manifest.Generation} verdict={verdict.Verdict} next={next?.Action}:{next?.TrackId}:{next?.Mode} \"{next?.Reason}\"" +
@@ -579,6 +594,15 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         break;
 
                     case RecoveryAction.CompleteOperation:
+                        // M23: Completed only after every library file the operation relies on is flushed to the SERVER
+                        // (fsync on CIFS is an SMB2 FLUSH round-trip); a client page cache must never stand in for it.
+                        if (DurabilityBarrier(context, manifest) is { } unsynced)
+                        {
+                            context.StorageProblem = unsynced;
+                            CrescendarrGuard.Emit(_logger, $"STORAGE_UNAVAILABLE op={context.OperationId} {unsynced}");
+                            return StorageUnavailable + ":" + unsynced;
+                        }
+
                         manifest = JournalEngine.Complete(manifest);
                         Save(context.OperationRoot, manifest);
                         break;
@@ -637,7 +661,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var reasons = new List<string>();
             for (var step = 0; step < 256; step++)
             {
-                var plan = Reconciler.Salvage(context.Manifest, HostSnapshot(context.Manifest, context.Artist.Id), Observe(context.Root, context.Manifest));
+                var plan = Reconciler.Salvage(context.Manifest, HostSnapshot(context.Manifest, context.Artist.Id), Observe(context, context.Manifest));
                 skipped = plan.Skipped.ToList();
                 reasons = plan.Reasons.ToList();
                 var next = plan.Actions.FirstOrDefault();
@@ -708,9 +732,39 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return ok;
         }
 
+        /// <summary>fsync every library file the operation relies on (destinations, protected originals, album lyrics). Null when all flushed.</summary>
+        private static string DurabilityBarrier(OperationContext context, OperationManifest manifest)
+        {
+            var b = manifest.Binding;
+            var paths = b.Tracks.Select(t => t.DestinationPath).Concat(b.Additions.Select(a => a.DestinationPath)).Concat(b.Kept.Select(k => k.Path))
+                .Concat(b.AlbumLyrics.Select(l => l.Path)).Distinct(StringComparer.Ordinal);
+            foreach (var path in paths)
+            {
+                try
+                {
+                    using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+                    stream.Flush(flushToDisk: true);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    return $"durability barrier failed ({error.GetType().Name}: {error.Message}) for {path}";
+                }
+            }
+
+            return null;
+        }
+
         private string FailClosed(OperationContext context, Exception error)
         {
             CrescendarrGuard.Emit(_logger, $"OPERATION_EXCEPTION op={context.OperationId} {error.GetType().Name}: {error.Message}");
+            // M23: an I/O failure (EIO, timeout, stale or read-only mount) is a storage outage, not evidence. The journal stays
+            // Active and the album stays blocked; recovery re-observes once storage answers again.
+            if (error is IOException || error.InnerException is IOException)
+            {
+                context.StorageProblem = error.GetType().Name + ": " + error.Message;
+                return StorageUnavailable + ":" + context.StorageProblem;
+            }
+
             if (context.Manifest is { Status: OperationStatus.Active } manifest)
             {
                 context.Manifest = JournalEngine.MarkReview(manifest, "unexpected " + error.GetType().Name + ": " + error.Message);
@@ -748,10 +802,10 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 Directory.Delete(context.Staging, recursive: true);
             // M19: entering review triggers the protective lyric salvage (lyric-only, no overwrite, verified rows only).
             if (outcome == RequiresReview) RunSalvage(context);
-            if (outcome is RequiresReview or OperatorApprovalRequired) WriteSummary(context, outcome, detail);
+            if (outcome is RequiresReview or OperatorApprovalRequired or StorageUnavailable) WriteSummary(context, outcome, detail);
 
-            // OperatorApprovalRequired is not terminal (the album stays blocked; recovery re-evaluates). Everything else is sticky.
-            if (outcome != OperatorApprovalRequired)
+            // OperatorApprovalRequired and StorageUnavailable are not terminal (the album stays blocked; recovery re-evaluates).
+            if (outcome is not (OperatorApprovalRequired or StorageUnavailable))
             {
                 Disk.WriteDurable(Path.Combine(context.OperationRoot, "outcome.json"), JsonSerializer.Serialize(new
                 {
@@ -909,6 +963,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
             var artistRoot = o.Artist.Path.TrimEnd('/');
             if (!Disk.IsUnder(root, artistRoot) || Disk.HasLinkInChain(artistRoot, root)) return "artist folder escapes the root or is reached through a link";
+            if (Disk.Probe(artistRoot) != Disk.PathState.Directory) return "artist folder is not reachable as a directory (unmounted or unavailable storage)";
+            // M23: a read-only or failing library must be refused BEFORE any destructive step (stock recycles first).
+            if (Disk.WriteProbeProblem(artistRoot) is { } notWritable) return "library is not writable: " + notWritable;
             foreach (var decision in o.Decisions)
             {
                 var path = Path.GetFullPath(decision.Item.Path);
@@ -1038,18 +1095,56 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return rows;
         }
 
-        private static FilesystemSnapshot Observe(string root, OperationManifest manifest)
+        /// <summary>
+        /// M23: the snapshot is UNAVAILABLE (never "everything absent") when the library mount differs from the one the
+        /// operation recorded (e.g. unmounted, leaving an empty local directory) or any bound path cannot be examined.
+        /// </summary>
+        private static FilesystemSnapshot Observe(OperationContext context, OperationManifest manifest)
         {
+            var root = context.Root;
+            context.StorageProblem = null;
             var files = ImmutableDictionary.CreateBuilder<string, FileObservation>(StringComparer.Ordinal);
+            var available = Directory.Exists(root);
+            if (context.LibraryIdentity != null)
+            {
+                var current = Disk.MountIdentity(manifest.Binding.ArtistRoot);
+                if (!string.Equals(current, context.LibraryIdentity, StringComparison.Ordinal))
+                {
+                    context.StorageProblem = $"library storage changed or unmounted (recorded {context.LibraryIdentity}, now {current})";
+                    return new FilesystemSnapshot(false, files.ToImmutable());
+                }
+            }
+
+            if (Disk.Probe(manifest.Binding.ArtistRoot) != Disk.PathState.Directory)
+            {
+                context.StorageProblem = $"artist folder is not reachable as a directory ({Disk.Probe(manifest.Binding.ArtistRoot)})";
+                return new FilesystemSnapshot(false, files.ToImmutable());
+            }
+
             foreach (var path in Reconciler.AllBoundPaths(manifest.Binding))
             {
                 var escapes = !Disk.IsUnder(root, path) || Disk.HasLinkInChain(path, root);
-                files[path] = File.Exists(path) && !escapes
-                    ? new FileObservation(true, new FileInfo(path).Length, Disk.Sha(path), false)
-                    : (Disk.Occupied(path) ? new FileObservation(true, null, null, escapes) : FileObservation.Absent with { Escapes = escapes });
+                var state = Disk.Probe(path);
+                if (state == Disk.PathState.Error)
+                {
+                    context.StorageProblem = "a bound path could not be examined (I/O error): " + path;
+                    return new FilesystemSnapshot(false, files.ToImmutable());
+                }
+
+                try
+                {
+                    files[path] = state == Disk.PathState.File && !escapes
+                        ? new FileObservation(true, new FileInfo(path).Length, Disk.Sha(path), false)
+                        : (state != Disk.PathState.Absent || Disk.IsLink(path) ? new FileObservation(true, null, null, escapes) : FileObservation.Absent with { Escapes = escapes });
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    context.StorageProblem = $"a bound file could not be read ({error.GetType().Name}): {path}";
+                    return new FilesystemSnapshot(false, files.ToImmutable());
+                }
             }
 
-            return new FilesystemSnapshot(Directory.Exists(root), files.ToImmutable());
+            return new FilesystemSnapshot(available, files.ToImmutable());
         }
 
         // ------------------------------------------------------------------ helpers
