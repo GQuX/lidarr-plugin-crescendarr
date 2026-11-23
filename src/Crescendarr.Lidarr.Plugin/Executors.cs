@@ -233,7 +233,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 outcome = RunJournal(context, manifest);
             }
 
-            if (outcome == "Completed") outcome = AddMissing(context, additions.Select(a => (a.Stock, a.Destination)).ToList());
+            if (outcome == "Completed") outcome = AddMissing(context, additions.Select(a => a.Stock).ToList());
             Finish(context, outcome);
         }
 
@@ -281,27 +281,25 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
                 if (outcome == "Completed")
                 {
-                    var additions = new List<(ImportDecision<LocalTrack>, string)>();
+                    var additions = new List<ImportDecision<LocalTrack>>();
                     foreach (var add in operation.GetProperty("additions").EnumerateArray())
                     {
                         var trackId = add.GetProperty("trackId").GetInt32();
-                        var destination = add.GetProperty("Destination").GetString();
                         var current = _tracks.GetTrack(trackId);
-                        if (current.TrackFileId > 0 && _mediaFiles.Get(current.TrackFileId)?.Path == destination) continue;
-                        if (File.Exists(destination))
+                        if (current.TrackFileId > 0)
                         {
-                            outcome = "RequiresReview";
-                            CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW add-missing destination exists without a linked row: {destination}");
-                            break;
+                            CrescendarrGuard.Emit(_logger, $"RECOVERY_ADD_ALREADY_LINKED track={trackId} trackFile={current.TrackFileId}");
+                            continue;
                         }
 
                         if (!context.StagedDecisionByTrack.TryGetValue(trackId, out var decision))
                         {
                             outcome = "RequiresReview";
+                            CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW add-missing track={trackId} has no staged copy and no linked file");
                             break;
                         }
 
-                        additions.Add((decision, destination));
+                        additions.Add(decision);
                     }
 
                     if (outcome == "Completed") outcome = AddMissing(context, additions);
@@ -431,15 +429,19 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return "RequiresReview";
         }
 
-        private string AddMissing(OperationContext context, List<(ImportDecision<LocalTrack> Stock, string Destination)> additions)
+        private string AddMissing(OperationContext context, List<ImportDecision<LocalTrack>> additions)
         {
-            foreach (var (stock, destination) in additions)
+            foreach (var stock in additions)
             {
                 var track = stock.Item.Tracks.Single();
                 var fresh = _tracks.GetTrack(track.Id);
-                if (fresh.TrackFileId != 0 || File.Exists(destination))
+                // Predict the stock destination from THIS decision (naming can depend on how it was identified).
+                var destination = _fileNames.BuildTrackFilePath(stock.Item.Tracks, context.Artist, context.Album,
+                    new TrackFile { Path = stock.Item.Path, SceneName = stock.Item.SceneName }, Path.GetExtension(stock.Item.Path));
+                if (fresh.TrackFileId != 0 || File.Exists(destination) || !stock.Approved ||
+                    !Disk.IsUnder(context.Artist.Path.TrimEnd('/'), destination) || Disk.HasLinkInChain(Path.GetDirectoryName(destination), context.Root))
                 {
-                    CrescendarrGuard.Emit(_logger, $"ADD_MISSING_REVIEW track={track.Id} host changed before add");
+                    CrescendarrGuard.Emit(_logger, $"ADD_MISSING_REVIEW track={track.Id} host changed, destination occupied or decision not approved: {destination}");
                     return "RequiresReview";
                 }
 
@@ -448,7 +450,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var linked = _tracks.GetTrack(track.Id);
                 var row = linked.TrackFileId > 0 ? _mediaFiles.Get(linked.TrackFileId) : null;
                 var ok = results.Count == 1 && results[0].Result == ImportResultType.Imported && row?.Path == destination && Disk.Sha(destination) == sha;
-                CrescendarrGuard.Emit(_logger, $"ADD_MISSING track={track.Id} ok={ok} trackFile={linked.TrackFileId} results=[{string.Join(",", results.Select(r => r.Result.ToString()))}]");
+                CrescendarrGuard.Emit(_logger, $"ADD_MISSING track={track.Id} ok={ok} trackFile={linked.TrackFileId} predicted=\"{destination}\" actual=\"{row?.Path}\" " +
+                    $"bytesMatch={(row != null && File.Exists(row.Path) && Disk.Sha(row.Path) == sha)} results=[{string.Join(",", results.Select(r => r.Result + ":" + string.Join("|", r.Errors)))}]");
                 if (!ok) return "RequiresReview";
             }
 

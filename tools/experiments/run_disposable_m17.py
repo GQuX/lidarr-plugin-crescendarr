@@ -393,10 +393,11 @@ def verify_final(host: Host, data: Path, base: Path, seed: dict, release_id: int
     after = library_view(after_state, seed, release_id)
     print_view("AFTER", after)
     seeded = {t["n"]: t for t in seed["tracks"]}
+    note(f"LIBRARY_FILES {sorted(p.name for p in artist_path.iterdir())}")
     for n in upgrades:
         name = f"{n:02d} - Synthetic Track {n}.mp3"
         check(after[n]["trackFileId"] not in (0, before[n]["trackFileId"]), f"track {n}: linked to a FRESH TrackFile row")
-        check(after[n]["quality"]["name"] == "MP3-256" and after[n]["sha"] == incoming[name], f"track {n}: library holds the incoming MP3-256 bytes")
+        check(after[n]["quality"] == 3 and after[n]["sha"] == incoming[name], f"track {n}: library holds the incoming MP3-256 bytes (stock quality id 3)")
         check(after[n]["lyrics"] == [(after[n]["lyrics"][0][0], Path(seeded[n]["lyricPath"]).name)] and len(after[n]["lyrics"]) == 1,
               f"track {n}: original lyric re-registered to the new TrackFile")
         check(sha(Path(seeded[n]["lyricPath"])) == seeded[n]["lyricSha"], f"track {n}: lyric bytes unchanged")
