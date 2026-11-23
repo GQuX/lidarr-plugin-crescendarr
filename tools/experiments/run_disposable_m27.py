@@ -55,6 +55,8 @@ class DockerHost(Host):
         self.image, self.run_args, self.created = image, run_args, False
 
     def start(self, marker: str) -> None:
+        # docker logs accumulate across restarts: only output produced by THIS boot may satisfy the marker.
+        mark = len(self.text())
         if not self.created:
             subprocess.run(["docker", "run", "-d", "--name", NAME, *self.run_args, self.image], check=True, capture_output=True)
             self.created = True
@@ -62,7 +64,7 @@ class DockerHost(Host):
             subprocess.run(["docker", "start", NAME], check=True, capture_output=True)
         limit = time.monotonic() + 240
         while time.monotonic() < limit:
-            if marker in self.text() and self.ping():
+            if marker in self.text()[mark:] and self.ping():
                 match = re.search(r"<ApiKey>([0-9a-f]+)</ApiKey>", (self.data / "config.xml").read_text())
                 if match:
                     self.key = match.group(1)
