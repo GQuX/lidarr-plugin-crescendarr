@@ -335,33 +335,73 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return full;
         }
 
-        public static string Sha(string path) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+        /// <summary>Hash even large audio files with bounded memory; never materialize an entire track in the heap.</summary>
+        public static string Sha(string path)
+        {
+            using var stream = File.OpenRead(path);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)).ToLowerInvariant();
+        }
 
         public static string Sha(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
 
-        /// <summary>Write via temp file + fsync + rename; replaces an existing file only when allowed.</summary>
-        public static void WriteDurable(string path, byte[] bytes, bool replace)
+        /// <summary>
+        /// Shared temp-file, file-fsync, atomic-rename path for small journal writes and large audio/lyric copies.
+        /// The destination is never exposed unless the writer succeeds. A failed write cleans up its partial file.
+        /// Parent-directory fsync is NOT provided; see the M23 durability evidence.
+        /// </summary>
+        private static void WriteAtomically(string path, bool replace, Action<FileStream> writer)
         {
             if (!replace && IsLink(path)) throw new CrescendarrGuardException($"Refusing to write over a link: {path}");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             var temporary = path + ".partial-" + Guid.NewGuid().ToString("N");
-            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            try
             {
-                stream.Write(bytes, 0, bytes.Length);
-                stream.Flush(true);
-            }
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    writer(stream);
+                    stream.Flush(flushToDisk: true);
+                }
 
-            File.Move(temporary, path, replace);
+                File.Move(temporary, path, replace);
+            }
+            finally
+            {
+                // An exception before rename must not accumulate potentially large abandoned staging files.
+                // File.Move has already removed the temporary pathname on success.
+                try { if (File.Exists(temporary)) File.Delete(temporary); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
+
+        /// <summary>Write via temp file + fsync + rename; replaces an existing file only when allowed.</summary>
+        public static void WriteDurable(string path, byte[] bytes, bool replace) =>
+            WriteAtomically(path, replace, stream => stream.Write(bytes, 0, bytes.Length));
 
         public static void WriteDurable(string path, string text, bool replace) => WriteDurable(path, Encoding.UTF8.GetBytes(text), replace);
 
-        /// <summary>No-overwrite verified copy: fails if the destination exists or the re-read bytes differ.</summary>
+        /// <summary>
+        /// Verified no-overwrite copy with bounded memory. Hash the actual bytes as they are streamed to the temporary
+        /// file, fail before rename if they differ from the immutable expected content, then re-read the placed file.
+        /// This preserves the M13/M18 crash journal and copy guarantees without allocating an entire audio track.
+        /// </summary>
         public static void CopyVerified(string source, string destination, string expectedSha)
         {
-            var bytes = File.ReadAllBytes(source);
-            if (Sha(bytes) != expectedSha) throw new CrescendarrGuardException($"Source changed before copy: {source}");
-            WriteDurable(destination, bytes, replace: false);
+            using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            var buffer = new byte[64 * 1024];
+            WriteAtomically(destination, replace: false, writer: output =>
+            {
+                int count;
+                while ((count = input.Read(buffer, 0, buffer.Length)) != 0)
+                {
+                    hash.AppendData(buffer, 0, count);
+                    output.Write(buffer, 0, count);
+                }
+
+                var actualSha = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                if (actualSha != expectedSha) throw new CrescendarrGuardException($"Source changed before copy: {source}");
+            });
             if (Sha(destination) != expectedSha) throw new CrescendarrGuardException($"Copy verification failed: {destination}");
         }
     }
