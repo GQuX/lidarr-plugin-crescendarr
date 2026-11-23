@@ -434,10 +434,12 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         }
 
                         Declared(JournalStep.NativeUpgrade);
-                        var results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
+                        List<ImportResult> results;
+                        using (ImportScope.Enter(context.Root, context.OperationRoot, trackId, "upgrade"))
+                            results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
                         nativeCount++;
                         CrescendarrGuard.Emit(_logger, $"NATIVE_IMPORT track={trackId} results=[{string.Join(",", results.Select(r => r.Result + ":" + string.Join("|", r.Errors)))}]");
-                        FaultPoint(context.Root, "after-native-" + nativeCount);
+                        Faults.Point(_logger, context.Root, "after-native-" + nativeCount);
                         break;
                     case RecoveryAction.RelinkLyric:
                         Declared(JournalStep.RelinkLyric);
@@ -492,7 +494,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 }
 
                 var sha = Disk.Sha(stock.Item.Path);
-                var results = _importer.Import(new List<ImportDecision<LocalTrack>> { stock }, false, null, ImportMode.Move);
+                List<ImportResult> results;
+                using (ImportScope.Enter(context.Root, context.OperationRoot, track.Id, "add"))
+                    results = _importer.Import(new List<ImportDecision<LocalTrack>> { stock }, false, null, ImportMode.Move);
                 var linked = _tracks.GetTrack(track.Id);
                 var row = linked.TrackFileId > 0 ? _mediaFiles.Get(linked.TrackFileId) : null;
                 var ok = results.Count == 1 && results[0].Result == ImportResultType.Imported && row?.Path == destination && Disk.Sha(destination) == sha;
@@ -626,17 +630,6 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             bytes[6] = (byte)((bytes[6] & 0x0F) | 0x40);
             bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
             return new Guid(bytes, true).ToString("D");
-        }
-
-        /// <summary>Deterministic, test-owned fault point: pauses (so the harness can SIGKILL the daemon) only when armed.</summary>
-        private void FaultPoint(string root, string name)
-        {
-            var armed = Path.Combine(root, "faults", "pause-" + name);
-            if (!File.Exists(armed)) return;
-            Disk.WriteDurable(Path.Combine(root, "faults", "paused-" + name), "paused\n", replace: true);
-            CrescendarrGuard.Emit(_logger, "FAULT_PAUSED " + name);
-            var deadline = DateTime.UtcNow.AddMinutes(5);
-            while (!File.Exists(Path.Combine(root, "faults", "release-" + name)) && DateTime.UtcNow < deadline) Thread.Sleep(100);
         }
     }
 }
