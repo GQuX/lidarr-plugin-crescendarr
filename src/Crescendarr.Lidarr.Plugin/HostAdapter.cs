@@ -323,6 +323,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     .Append('|').Append(string.Join(",", lyricRows.Select(l => l.Id + ":" + l.RelativePath))).Append('\n');
             }
 
+            // M24: the quality profile decides Upgrade vs Keep, so it is part of the album state an approval is bound to.
+            state.Append("profile|").Append(ProfileToken(o.Artist.QualityProfile.Value)).Append('\n');
             var download = new DownloadSnapshot(o.Item.DownloadId, o.Album.Id, o.CandidateRelease.ForeignReleaseId,
                 Disk.Sha(Encoding.UTF8.GetBytes(inventory.ToString())), incoming.ToImmutable());
             var album = new AlbumSnapshot(o.Album.Id, o.MonitoredRelease.ForeignReleaseId,
@@ -337,6 +339,21 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             }
 
             return plan;
+        }
+
+        /// <summary>Ranking-relevant profile state: ID, upgrade flag, cutoff and every item (with group members) in order.</summary>
+        public static string ProfileToken(QualityProfile profile)
+        {
+            var text = new StringBuilder();
+            text.Append(profile.Id).Append(';').Append(profile.UpgradeAllowed).Append(';').Append(profile.Cutoff).Append(';');
+            foreach (var item in profile.Items)
+            {
+                text.Append('[').Append(item.Id).Append(':').Append(item.Quality?.Id).Append(':').Append(item.Allowed);
+                foreach (var member in item.Items ?? new List<QualityProfileQualityItem>()) text.Append(',').Append(member.Quality?.Id).Append(':').Append(member.Allowed);
+                text.Append(']');
+            }
+
+            return Disk.Sha(Encoding.UTF8.GetBytes(text.ToString()))[..16];
         }
 
         public string Describe(Observation o)

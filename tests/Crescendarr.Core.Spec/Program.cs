@@ -41,7 +41,7 @@ var specs = new (string Name, Action Test)[]
     ("M22 incoming MP3 must be a continuous frame chain (holes, shifts and junk are refused)", Mp3Integrity),
     ("Changing incoming edition changes plan identity", ChangedIncomingEdition),
     ("Changing staged lyric inventory changes plan identity", ChangedStagedLyrics)
-};
+}.Concat(RegistrySpecs.All).ToArray();
 int failures = 0;
 foreach (var (name, test) in specs)
 {

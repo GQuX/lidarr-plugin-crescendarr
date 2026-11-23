@@ -10,6 +10,7 @@
 // completed download. It never calls the client's RemoveItem, never deletes sources and never claims stock settlement.
 using System.Text;
 using System.Text.Json;
+using Crescendarr.Core.Registry;
 using FluentValidation;
 using FluentValidation.Results;
 using NLog;
@@ -237,7 +238,14 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var status = Path.Combine(root, "crescendarr", "status-cycle.json");
             if (File.Exists(status))
             {
-                var awaiting = JsonDocument.Parse(File.ReadAllText(status)).RootElement.GetProperty("counters").GetProperty("awaitingApproval").GetInt32();
+                var counters = JsonDocument.Parse(File.ReadAllText(status)).RootElement.GetProperty("counters");
+                int Count(string name) => counters.TryGetProperty(name, out var v) ? v.GetInt32() : 0;
+                var registryReview = Count("registryReview");
+                if (registryReview > 0)
+                    return new NzbDrone.Core.HealthCheck.HealthCheck(GetType(), HealthCheckResult.Warning, HealthCheckReason.ServerNotification,
+                        $"Crescendarr: {registryReview} completed download(s) need review in the download registry (identity conflict, unverified completion, " +
+                        "unreadable record or several clients reporting one folder). Nothing is imported for them until an operator removes the record.");
+                var awaiting = Count("awaitingApproval");
                 if (awaiting > 0)
                     return new NzbDrone.Core.HealthCheck.HealthCheck(GetType(), HealthCheckResult.Warning, HealthCheckReason.ServerNotification,
                         $"Crescendarr (audit only): {awaiting} completed download(s) have a Ready plan awaiting approval (CrescendarrImport with the plan ID in the download registry).");
@@ -249,8 +257,6 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
     public sealed partial class CrescendarrImportExecutor : IExecute<CrescendarrCycleCommand>
     {
-        private static readonly string[] TerminalDownloadStates = { "Imported", "NoImprovement", "NeedsReview", "Blocked", "RequiresReview", "Refused" };
-
         public void Execute(CrescendarrCycleCommand message)
         {
             var root = CrescendarrGuard.RequireRoot();
@@ -259,6 +265,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             {
                 ["observed"] = 0, ["ready"] = 0, ["awaitingApproval"] = 0, ["imported"] = 0, ["noImprovement"] = 0, ["review"] = 0,
                 ["alreadyHandled"] = 0, ["blockedAlbum"] = 0, ["recovered"] = 0, ["pendingRecovery"] = 0, ["refused"] = 0, ["errors"] = 0,
+                ["reevaluated"] = 0, ["registryReview"] = 0,
             };
             var settings = CrescendarrConfiguration.Read(_notifications, out var problem);
             var mode = settings == null ? CrescendarrMode.Disabled : (CrescendarrMode)settings.Mode;
@@ -311,41 +318,136 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             foreach (var (item, clientId, folder, reason) in clients.Refused)
             {
                 counters["refused"]++;
-                var registryPath = Disk.RequireConfined(root, Path.Combine(root, "crescendarr", "downloads", Disk.Sha(Encoding.UTF8.GetBytes(folder))[..16] + ".json"), "download registry");
-                Disk.WriteDurable(registryPath, JsonSerializer.Serialize(new
+                var registryPath = RegistryPath(root, folder);
+                var (previousRecord, raw, readable) = ReadRegistry(registryPath);
+                if (readable && previousRecord != null && !DownloadRegistryPolicy.PendingStates.Contains(previousRecord.State) &&
+                    !DownloadRegistryPolicy.ConclusionStates.Contains(previousRecord.State))
                 {
-                    downloadId = item.DownloadId, clientDefinitionId = clientId, folder, inventoryDigest = (string)null, state = "RefusedUnsafePath", reason,
-                    pluginHandled = false, lidarrImported = false, downloaderRemoved = false, sourceRetained = Directory.Exists(folder), lastSeen = DateTime.UtcNow
-                }, new JsonSerializerOptions { WriteIndented = true }), replace: true);
-                CrescendarrGuard.Emit(_logger, $"CYCLE_REFUSED_ITEM download=\"{item.DownloadId}\" folder=\"{folder}\" reason=\"{reason}\"");
+                    counters["registryReview"]++;
+                    CrescendarrGuard.Emit(_logger, $"CYCLE_REFUSED_ITEM download=\"{item.DownloadId}\" folder=\"{folder}\" reason=\"{reason}\" kept={previousRecord.State}");
+                    continue;
+                }
+
+                WriteRegistry(registryPath, readable ? raw : null, new SourceIdentity(clientId, item.DownloadId, folder, null), "RefusedUnsafePath", reason, null, null, null, false);
+                if (previousRecord?.State != "RefusedUnsafePath")
+                    CrescendarrGuard.Emit(_logger, $"CYCLE_REFUSED_ITEM download=\"{item.DownloadId}\" folder=\"{folder}\" reason=\"{reason}\"");
             }
 
-            foreach (var (item, clientId, watch) in clients.Completed)
+            // M24: two client items claiming one completed folder (or one download ID) are never told apart by guessing.
+            var completed = clients.Completed.Select(c => (c.Item, c.ClientId, c.WatchFolder, Folder: Path.GetFullPath(c.Item.OutputPath.FullPath).TrimEnd('/'))).ToList();
+            var ambiguous = completed.GroupBy(c => c.Folder, StringComparer.Ordinal).Where(g => g.Count() > 1).SelectMany(g => g)
+                .Concat(completed.GroupBy(c => c.Item.DownloadId, StringComparer.Ordinal).Where(g => g.Count() > 1).SelectMany(g => g))
+                .Select(c => c.Folder).ToHashSet(StringComparer.Ordinal);
+            foreach (var folder in ambiguous.OrderBy(f => f, StringComparer.Ordinal))
             {
                 counters["observed"]++;
                 try
                 {
-                    var observation = _adapter.Observe(item, clientId, watch);
-                    var digest = Disk.Sha(Encoding.UTF8.GetBytes(string.Join("\n", observation.IncomingSha.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + ":" + k.Value))));
-                    var registryPath = Disk.RequireConfined(root, Path.Combine(root, "crescendarr", "downloads", Disk.Sha(Encoding.UTF8.GetBytes(observation.Folder))[..16] + ".json"), "download registry");
-                    var previous = File.Exists(registryPath) ? JsonDocument.Parse(File.ReadAllText(registryPath)).RootElement.Clone() : (JsonElement?)null;
-                    if (previous is { } p && p.GetProperty("inventoryDigest").GetString() == digest && TerminalDownloadStates.Contains(p.GetProperty("state").GetString()))
+                    var ids = completed.Where(c => c.Folder == folder).Select(c => c.Item.DownloadId).ToHashSet(StringComparer.Ordinal);
+                    var claimants = completed.Where(c => c.Folder == folder || ids.Contains(c.Item.DownloadId)).ToList();
+                    var registryPath = RegistryPath(root, folder);
+                    var (previousRecord, raw, readable) = ReadRegistry(registryPath);
+                    counters["registryReview"]++;
+                    if (readable && previousRecord != null && previousRecord.State != DownloadRegistryPolicy.AmbiguousSource &&
+                        !DownloadRegistryPolicy.PendingStates.Contains(previousRecord.State) && !DownloadRegistryPolicy.ConclusionStates.Contains(previousRecord.State))
                     {
-                        // Duplicate processing prevention: same folder, same bytes, already handled. Nothing is re-imported.
+                        // Durable, locked or review records are never overwritten by an ambiguity; their evidence stays.
                         counters["alreadyHandled"]++;
-                        CrescendarrGuard.Emit(_logger, $"CYCLE_ALREADY_HANDLED download=\"{item.DownloadId}\" state={p.GetProperty("state").GetString()}");
                         continue;
                     }
 
+                    var first = claimants[0];
+                    var reason = "several download-client items report this completed folder or download ID: " +
+                        string.Join("; ", claimants.Select(c => $"client {c.ClientId} download \"{c.Item.DownloadId}\""));
+                    if (previousRecord?.State != DownloadRegistryPolicy.AmbiguousSource)
+                        CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{first.Item.DownloadId}\" state={DownloadRegistryPolicy.AmbiguousSource} reason=\"{reason}\"");
+                    WriteRegistry(registryPath, readable ? raw : null, new SourceIdentity(first.ClientId, first.Item.DownloadId, folder, null), DownloadRegistryPolicy.AmbiguousSource,
+                        reason, null, null, null, false,
+                        extra: new { claimants = claimants.Select(c => new { clientDefinitionId = c.ClientId, downloadId = c.Item.DownloadId, folder = c.Folder }).ToList() });
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    counters["errors"]++;
+                    CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD_ERROR folder=\"{folder}\" {error.GetType().Name}: {error.Message}");
+                }
+            }
+
+            foreach (var (item, clientId, watch, folder) in completed.Where(c => !ambiguous.Contains(c.Folder)))
+            {
+                counters["observed"]++;
+                try
+                {
+                    var registryPath = RegistryPath(root, folder);
+                    var (previousRecord, raw, readable) = ReadRegistry(registryPath);
+                    if (!readable)
+                    {
+                        // Broken or foreign registry record: preserve it as evidence and stop; never plan or import from it.
+                        var preserved = registryPath + ".unreadable-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ", System.Globalization.CultureInfo.InvariantCulture);
+                        File.Move(registryPath, preserved);
+                        counters["registryReview"]++;
+                        counters["review"]++;
+                        CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" state={DownloadRegistryPolicy.RegistryUnreadable} preserved=\"{Path.GetFileName(preserved)}\"");
+                        WriteRegistry(registryPath, null, new SourceIdentity(clientId, item.DownloadId, folder, null), DownloadRegistryPolicy.RegistryUnreadable,
+                            "the previous registry record could not be read; it was preserved and an operator must review it", null, null, null, false,
+                            extra: new { preservedAs = Path.GetFileName(preserved) });
+                        continue;
+                    }
+
+                    var observation = _adapter.Observe(item, clientId, watch);
+                    var current = new SourceIdentity(clientId, item.DownloadId, folder, ContentDigest(observation.IncomingSha));
                     var disposition = observation.Blocked != null ? "Blocked" : observation.Plan?.Disposition.ToString() ?? "Blocked";
+                    var evaluation = DownloadRegistryPolicy.Evaluation(disposition, observation.Plan?.PlanId, observation.Blocked);
+                    var (evidence, evidenceOperation) = Evidence(root, raw, current);
+                    var decision = DownloadRegistryPolicy.Decide(previousRecord, current, evaluation, evidence);
+
+                    if (decision.Action == RegistryAction.SkipHandled)
+                    {
+                        counters["alreadyHandled"]++;
+                        continue;
+                    }
+
+                    if (decision.Action == RegistryAction.SkipUnchanged)
+                    {
+                        counters["alreadyHandled"]++;
+                        if (DownloadRegistryPolicy.ReviewStates.Contains(decision.State)) counters["registryReview"]++;
+                        if (decision.State != previousRecord?.State)
+                        {
+                            CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" state={decision.State} reason=\"{decision.Reason}\"");
+                            WriteRegistry(registryPath, raw, current, decision.State, decision.Reason, observation, disposition, evaluation, false,
+                                operationId: evidenceOperation);
+                        }
+
+                        continue;
+                    }
+
+                    if (decision.Action == RegistryAction.RecordCompletion)
+                    {
+                        counters["alreadyHandled"]++;
+                        CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" state={DownloadRegistryPolicy.Imported} operation={evidenceOperation} reason=\"{decision.Reason}\"");
+                        WriteRegistry(registryPath, raw, current, DownloadRegistryPolicy.Imported, decision.Reason, observation, disposition, evaluation, false,
+                            operationId: evidenceOperation, completion: new { operationId = evidenceOperation, outcome = Completed, verifiedUtc = DateTime.UtcNow });
+                        continue;
+                    }
+
+                    if (decision.Action == RegistryAction.Review)
+                    {
+                        counters["registryReview"]++;
+                        counters["review"]++;
+                        if (decision.State == previousRecord?.State) continue;
+                        CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" state={decision.State} reason=\"{decision.Reason}\"");
+                        WriteRegistry(registryPath, raw, current, decision.State, decision.Reason, observation, disposition, evaluation, false,
+                            operationId: evidenceOperation, keepPrevious: true);
+                        continue;
+                    }
+
+                    // Evaluate: the FRESH plan decides; any import still goes through RunImport's re-observation and plan gate.
                     var state = disposition switch
                     {
-                        "Ready" => mode == CrescendarrMode.GuardedAuto ? "Ready" : "AwaitingApproval",
+                        "Ready" => mode == CrescendarrMode.GuardedAuto && decision.AutoImportAllowed ? "Ready" : "AwaitingApproval",
                         "NoImprovement" => "NoImprovement",
                         "NeedsReview" => "NeedsReview",
                         _ => "Blocked",
                     };
-                    string operationOutcome = null;
                     if (state == "Ready")
                     {
                         counters["ready"]++;
@@ -357,8 +459,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         else if (imports < settings.MaxImportsPerCycle)
                         {
                             imports++;
-                            operationOutcome = RunImport(item.DownloadId, observation.Plan.PlanId);
-                            state = operationOutcome == Completed ? "Imported" : operationOutcome;
+                            var operationOutcome = RunImport(item.DownloadId, observation.Plan.PlanId);
+                            state = operationOutcome == Completed ? DownloadRegistryPolicy.Imported : operationOutcome;
                         }
                         else
                         {
@@ -366,21 +468,21 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         }
                     }
 
+                    var changed = previousRecord == null || previousRecord.State != state || previousRecord.Evaluation != evaluation;
+                    if (previousRecord != null && changed) counters["reevaluated"]++;
                     if (state == "AwaitingApproval") counters["awaitingApproval"]++;
-                    if (state == "Imported") counters["imported"]++;
+                    if (state == DownloadRegistryPolicy.Imported) counters["imported"]++;
                     if (state == "NoImprovement") counters["noImprovement"]++;
                     if (state is "NeedsReview" or "Blocked" or "RequiresReview" or "OperatorApprovalRequired" or "Refused") counters["review"]++;
-                    Disk.WriteDurable(registryPath, JsonSerializer.Serialize(new
+                    var operationId = observation.Plan == null ? null : OperationId(observation.Plan.PlanId);
+                    WriteRegistry(registryPath, raw, current, state, decision.Reason, observation, disposition, evaluation, !decision.AutoImportAllowed,
+                        operationId: operationId,
+                        completion: state == DownloadRegistryPolicy.Imported ? new { operationId, outcome = Completed, verifiedUtc = DateTime.UtcNow } : null);
+                    if (changed)
                     {
-                        downloadId = item.DownloadId, clientDefinitionId = clientId, folder = observation.Folder, inventoryDigest = digest, state,
-                        planId = observation.Plan?.PlanId, disposition, blocked = observation.Blocked,
-                        operationId = observation.Plan == null ? null : OperationId(observation.Plan.PlanId),
-                        pluginHandled = state is "Imported" or "NoImprovement" or "NeedsReview" or "Blocked" or "RequiresReview" or "Refused",
-                        lidarrImported = false, downloaderRemoved = false, sourceRetained = Directory.Exists(observation.Folder),
-                        settlement = "Plugin-local record only. Crescendarr never calls the client's RemoveItem and never marks the stock queue imported (CDH OFF).",
-                        firstSeen = previous?.TryGetProperty("firstSeen", out var first) == true ? first.GetDateTime() : DateTime.UtcNow, lastSeen = DateTime.UtcNow
-                    }, new JsonSerializerOptions { WriteIndented = true }), replace: true);
-                    CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" disposition={disposition} state={state} plan={observation.Plan?.PlanId} reason=\"{observation.Blocked}\"");
+                        CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" disposition={disposition} state={state} plan={observation.Plan?.PlanId} " +
+                            $"previous={previousRecord?.State ?? "none"} reason=\"{observation.Blocked ?? decision.Reason}\"");
+                    }
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
@@ -392,6 +494,113 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             WriteCycleStatus(root, mode, null, counters);
             CrescendarrGuard.Emit(_logger, "CYCLE_SUMMARY " + string.Join(" ", counters.Select(c => c.Key + "=" + c.Value)));
             if (counters["errors"] > 0) throw new CommandFailedException($"Crescendarr cycle finished with {counters["errors"]} error(s); see the download registry.");
+        }
+
+        private static readonly JsonSerializerOptions Indented = new JsonSerializerOptions { WriteIndented = true };
+
+        private static string RegistryPath(string root, string folder) =>
+            Disk.RequireConfined(root, Path.Combine(root, "crescendarr", "downloads", Disk.Sha(Encoding.UTF8.GetBytes(folder))[..16] + ".json"), "download registry");
+
+        private static string ContentDigest(IReadOnlyDictionary<string, string> incoming) =>
+            Disk.Sha(Encoding.UTF8.GetBytes(string.Join("\n", incoming.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + ":" + k.Value))));
+
+        /// <summary>The previous record, or (null, null, true) when there is none; (null, null, false) when it cannot be trusted.</summary>
+        private static (RegistryRecord Record, JsonElement? Raw, bool Readable) ReadRegistry(string path)
+        {
+            if (!File.Exists(path)) return (null, null, true);
+            try
+            {
+                var raw = JsonDocument.Parse(File.ReadAllText(path)).RootElement.Clone();
+                if (raw.ValueKind != JsonValueKind.Object) return (null, null, false);
+                string Text(string name) => raw.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                var schema = raw.TryGetProperty("schema", out var s) ? s.GetInt32() : 1;
+                var state = Text("state");
+                if (state == null || Text("folder") == null || !raw.TryGetProperty("clientDefinitionId", out var client)) return (null, null, false);
+                var manual = raw.TryGetProperty("manualOnly", out var m) && m.ValueKind == JsonValueKind.True;
+                return (new RegistryRecord(schema, state, new SourceIdentity(client.GetInt32(), Text("downloadId"), Text("folder"), Text("inventoryDigest")),
+                    Text("evaluation"), manual), raw, true);
+            }
+            catch (Exception error) when (error is JsonException or InvalidOperationException or FormatException or KeyNotFoundException)
+            {
+                return (null, null, false);
+            }
+        }
+
+        /// <summary>
+        /// Completion evidence from the operations' OWN durable files: first the operation the record names, otherwise any
+        /// operation whose operation.json binds exactly this client, download ID, folder and content.
+        /// </summary>
+        private static (OperationEvidence Evidence, string OperationId) Evidence(string root, JsonElement? raw, SourceIdentity current)
+        {
+            var ops = Path.Combine(root, "crescendarr", "ops");
+            string Named()
+            {
+                if (raw is not { } r) return null;
+                if (r.TryGetProperty("completion", out var c) && c.ValueKind == JsonValueKind.Object && c.TryGetProperty("operationId", out var ci) && ci.ValueKind == JsonValueKind.String) return ci.GetString();
+                return r.TryGetProperty("operationId", out var o) && o.ValueKind == JsonValueKind.String ? o.GetString() : null;
+            }
+
+            (OperationEvidence, string) Of(string id)
+            {
+                if (id == null || !Guid.TryParseExact(id, "D", out _)) return (OperationEvidence.None, null);
+                var opRoot = Disk.RequireConfined(root, Path.Combine(ops, id), "operation");
+                if (!Directory.Exists(opRoot)) return (OperationEvidence.None, null);
+                var state = OperationState(opRoot);
+                if (state is "Resolved" or Abandoned) return (OperationEvidence.ResolvedByOperator, id);
+                if (state != Completed) return (OperationEvidence.Unfinished, id);
+                return (BindsSource(opRoot, current) ? OperationEvidence.CompletedForThisSource : OperationEvidence.CompletedForOtherSource, id);
+            }
+
+            var named = Of(Named());
+            if (named.Item1 != OperationEvidence.None || !Directory.Exists(ops)) return named;
+            foreach (var opRoot in Directory.GetDirectories(ops).OrderBy(d => d, StringComparer.Ordinal))
+            {
+                if (!BindsSource(opRoot, current)) continue;
+                var found = Of(Path.GetFileName(opRoot));
+                if (found.Item1 != OperationEvidence.None) return found;
+            }
+
+            return (OperationEvidence.None, null);
+        }
+
+        private static bool BindsSource(string opRoot, SourceIdentity current)
+        {
+            var path = Path.Combine(opRoot, "operation.json");
+            if (!File.Exists(path)) return false;
+            try
+            {
+                var op = JsonDocument.Parse(File.ReadAllText(path)).RootElement;
+                var candidates = op.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString(), StringComparer.Ordinal);
+                return op.GetProperty("clientId").GetInt32() == current.ClientId && op.GetProperty("downloadId").GetString() == current.DownloadId &&
+                    Path.GetFullPath(op.GetProperty("downloadFolder").GetString()).TrimEnd('/') == current.Folder && ContentDigest(candidates) == current.ContentDigest;
+            }
+            catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException)
+            {
+                return false;
+            }
+        }
+
+        private static void WriteRegistry(string path, JsonElement? previous, SourceIdentity identity, string state, string reason, Observation observation,
+            string disposition, string evaluation, bool manualOnly, string operationId = null, object completion = null, bool keepPrevious = false, object extra = null)
+        {
+            object Carried(string name) => previous is { } p && p.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null ? v.Clone() : null;
+            var record = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["schema"] = DownloadRegistryPolicy.CurrentSchema,
+                ["downloadId"] = identity.DownloadId, ["clientDefinitionId"] = identity.ClientId, ["folder"] = identity.Folder, ["inventoryDigest"] = identity.ContentDigest,
+                ["state"] = state, ["reason"] = reason, ["evaluation"] = evaluation, ["manualOnly"] = manualOnly,
+                ["planId"] = observation?.Plan?.PlanId, ["disposition"] = disposition, ["blocked"] = observation?.Blocked,
+                ["operationId"] = operationId,
+                // Completion evidence is never dropped: a review record keeps the completion it is disputing.
+                ["completion"] = completion ?? Carried("completion"),
+                ["pluginHandled"] = state is DownloadRegistryPolicy.Imported or "NoImprovement" or "NeedsReview" or "Blocked" or "RequiresReview" or "Refused",
+                ["lidarrImported"] = false, ["downloaderRemoved"] = false, ["sourceRetained"] = Directory.Exists(identity.Folder),
+                ["settlement"] = "Plugin-local record only. Crescendarr never calls the client's RemoveItem and never marks the stock queue imported (CDH OFF).",
+                ["firstSeen"] = Carried("firstSeen") ?? DateTime.UtcNow, ["lastSeen"] = DateTime.UtcNow,
+            };
+            if (keepPrevious && previous is { } prior) record["previousRecord"] = prior.Clone();
+            if (extra != null) record["details"] = extra;
+            Disk.WriteDurable(path, JsonSerializer.Serialize(record, Indented), replace: true);
         }
 
         private static void WriteCycleStatus(string root, CrescendarrMode mode, string problem, Dictionary<string, int> counters)

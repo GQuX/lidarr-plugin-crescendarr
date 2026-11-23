@@ -176,8 +176,10 @@ def lane_audit(lane: Lane) -> None:
         check(status(result) == "completed", "explicit operator approval (the registry plan ID) imported the download")
         verify_consistent(lane, "after-approval", [1], 2, [3])
         mark = len(host.text())
-        wait_summary(host, r"noImprovement=1", mark)
-        check(registry(lane)[GOOD]["state"] == "NoImprovement" and host.text()[mark:].count("NATIVE_IMPORT") == 0, "the next audit cycle records it handled; nothing imported")
+        wait_summary(host, r"alreadyHandled=1", mark)
+        # M24: the approved import is durably Imported, bound to its completed operation (previously recorded as a
+        # reproducible NoImprovement, which a later library change could have re-planned into a second import).
+        check(registry(lane)[GOOD]["state"] == "Imported" and host.text()[mark:].count("NATIVE_IMPORT") == 0, "the next audit cycle records it handled; nothing imported")
         check(not any("awaiting approval" in (h.get("message") or "") for h in health(host)), "health warning cleared")
         downloads_intact(lane, [GOOD])
     finally:
