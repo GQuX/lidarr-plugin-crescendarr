@@ -1,3 +1,19 @@
+# M22 update (issue #56, draft PR #57): real SABnzbd end-to-end
+
+**REAL-SAB-PROVEN** with a pinned real SABnzbd 5.1.3 downloading synthetic par2-protected NZBs over localhost NNTP, through stock Lidarr's own Sabnzbd client (CDH OFF). Run [45180117144](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45180117144), 5/5:
+- automatic selective import, verified in SQLite and bytes;
+- a real par2 failure, then SAB's own retry, then exactly one import;
+- SIGKILL/restart mid-download, and Lidarr down at completion;
+- SAB unavailable, an out-of-root job, and a same-name job.
+
+**Plugin defects found with real SAB and fixed:**
+- a no-par2 job with a missing article is reported **Completed** by SAB and was **imported**; incoming MP3s are now frame-continuity checked;
+- one failing client or unsafe item aborted the whole cycle; clients and items are now isolated.
+
+**Still not tested:** unpack, remote path mapping, malformed responses (mock only), and non-MP3 integrity. Production stays **NO-GO**. See [`docs/release-gates/m22-real-sabnzbd-evidence.md`](docs/release-gates/m22-real-sabnzbd-evidence.md).
+
+---
+
 # M21 update (issue #52, draft PR #55): realistic compatibility and pre-release gates
 
 **PROVEN on the real stock daemon:**
