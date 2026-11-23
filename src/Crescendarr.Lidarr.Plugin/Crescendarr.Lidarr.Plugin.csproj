@@ -23,5 +23,6 @@
     <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System.IO.Abstractions"><HintPath>$(LidarrBinDir)/System.IO.Abstractions.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="FluentValidation"><HintPath>$(LidarrBinDir)/FluentValidation.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 </Project>
