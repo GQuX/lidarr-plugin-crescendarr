@@ -1,3 +1,20 @@
+# M23 update (issue #58, draft PR #59): real kernel CIFS (SMB 3.1.1) library
+
+**PROVEN on a real Linux kernel CIFS mount** (loopback Samba 4.19.5, `cifs.ko` 2.59, `vers=3.1.1`, `soft`), run [45208473594](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45208473594), 6/6:
+- the 3- and 12-track selective imports;
+- a SIGKILL inside stock Import, then a stock-rescan cascade, then recovery;
+- an unreachable SMB server, which gives non-terminal **StorageUnavailable** and later recovers;
+- an unmounted share, where nothing is written into the bare mountpoint;
+- a read-only share, refused up front.
+
+**Four storage-safety defects found and fixed.** The most serious: on CIFS the server moves a freshly written file's mtime after the client reported it (deferred close). Stock's rescan then re-imported the album and unregistered every lyric. The completion barrier now flushes and settles the `Modified` of the rows Crescendarr creates.
+
+**Stock limitation:** rows stock writes itself on CIFS can hit the same cascade.
+
+**Not tested:** power loss, partial writes, ENOSPC, a CIFS-hosted recycle bin or journal. Production stays **NO-GO**. See [`docs/release-gates/m23-cifs-durability.md`](docs/release-gates/m23-cifs-durability.md).
+
+---
+
 # M22 update (issue #56, draft PR #57): real SABnzbd end-to-end
 
 **REAL-SAB-PROVEN** with a pinned real SABnzbd 5.1.3 downloading synthetic par2-protected NZBs over localhost NNTP, through stock Lidarr's own Sabnzbd client (CDH OFF). Run [45180117144](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45180117144), 5/5:
