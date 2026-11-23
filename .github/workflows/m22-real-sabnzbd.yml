@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [sab-real-happy, sab-real-failed-retry, sab-real-restarts, sab-real-paths]
+        scenario: [sab-real-happy, sab-real-failed-retry, sab-real-restarts, sab-real-paths, sab-real-unverified-missing]
     steps:
       - uses: actions/checkout@v4
         with:

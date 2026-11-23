@@ -41,10 +41,11 @@ from run_disposable_m17 import CLIENT, Failure, Host, check, library_view, note,
 from run_disposable_m18 import GOOD, Lane, prepare, verify_consistent  # noqa: E402
 from run_disposable_m20 import configure, registry, summaries, wait_cycles, wait_summary  # noqa: E402
 
-LANES = ("sab-real-happy", "sab-real-failed-retry", "sab-real-restarts", "sab-real-paths")
+LANES = ("sab-real-happy", "sab-real-failed-retry", "sab-real-restarts", "sab-real-paths", "sab-real-unverified-missing")
 SAB_PORT, NNTP_PORT = 18085, 11119
 WRONG = "Crescendarr Synthetic Album [wrong edition]"
 API_KEY = secrets.token_hex(16)
+JOB_NAMES: dict[Path, str] = {}
 NZB_KEY = secrets.token_hex(16)
 
 
@@ -94,6 +95,7 @@ history_retention_option = all
 ignore_samples = 0
 deobfuscate_final_filenames = 0
 enable_meta = 1
+enable_par_cleanup = 1
 [servers]
 [[127.0.0.1]]
 name = 127.0.0.1
@@ -147,8 +149,8 @@ priority = 0
             return json.loads(response.read())
 
     def add(self, nzb: Path, category: str = "music") -> str:
-        result = self.api("addlocalfile", name=str(nzb), cat=category)
-        check(result.get("status") is True and result.get("nzo_ids"), f"real SABnzbd accepted {nzb.name}")
+        result = self.api("addlocalfile", name=str(nzb), cat=category, nzbname=JOB_NAMES[nzb])
+        check(result.get("status") is True and result.get("nzo_ids"), f"real SABnzbd accepted job '{JOB_NAMES[nzb]}' ({nzb.name})")
         return result["nzo_ids"][0]
 
     def job(self, nzo: str) -> tuple[str, dict | None]:
@@ -200,13 +202,27 @@ def connect_lidarr(host: Host, name: str = "Crescendarr Synthetic SABnzbd", cate
     check(host.api("GET", "config/downloadclient")["enableCompletedDownloadHandling"] is False, "stock CDH stays OFF")
 
 
-def stage_job(lane: Lane, store: ArticleStore, source: str, job: str) -> tuple[Path, dict[str, str]]:
+def stage_job(lane: Lane, store: ArticleStore, source: str, job: str, par2: bool = True) -> tuple[Path, dict[str, str], list[str]]:
+    """Synthetic NZB for the prepared files. With par2 (the realistic default) real SABnzbd verifies and repairs the job
+    with the real par2 tool; the data message-ids are returned so a test can withhold articles."""
     folder = lane.base / "prepared" / source
     files = sorted(p for p in folder.iterdir() if p.is_file())
-    nzb = lane.base / "nzbs" / f"{job}.nzb"
-    nzb.parent.mkdir(exist_ok=True)
-    write_nzb(store, files, nzb, job)
-    return nzb, {p.name: sha(p) for p in files}
+    incoming = {p.name: sha(p) for p in files}
+    parts = files
+    if par2:
+        (lane.base / "par2src").mkdir(exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="job-", dir=lane.base / "par2src"))
+        for f in files:
+            shutil.copyfile(f, work / f.name)
+        subprocess.run(["par2", "create", "-q", "-q", "-r10", "-n1", "-a", "album.par2", "--", *[f.name for f in files]], cwd=work, check=True)
+        parts = [work / f.name for f in files] + sorted(work.glob("*.par2"))
+        note(f"PAR2 job={job} files={[p.name for p in parts]}")
+    (lane.base / "nzbs").mkdir(exist_ok=True)
+    nzb = lane.base / "nzbs" / f"job-{secrets.token_hex(4)}.nzb"
+    ids = write_nzb(store, parts, nzb, job)
+    JOB_NAMES[nzb] = job
+    data_ids = [i for i in ids if any(store.articles[i].startswith(f"=ybegin".encode()) and f"name={f.name}".encode() in store.articles[i][:200] for f in files)]
+    return nzb, incoming, data_ids
 
 
 def no_delete_and_intact(lane: Lane, sab: RealSab, nzo: str, folder: Path, incoming: dict[str, str]) -> None:
@@ -229,7 +245,7 @@ def boot_with_sab(lane: Lane, sab: RealSab, mode: str = "GuardedAuto") -> Host:
 # ------------------------------------------------------------------ lanes
 
 def lane_happy(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
-    nzb, incoming = stage_job(lane, store, GOOD, GOOD)
+    nzb, incoming, data_ids = stage_job(lane, store, GOOD, GOOD)
     host = boot_with_sab(lane, sab)
     try:
         before = lane.view("before")
@@ -261,16 +277,19 @@ def lane_happy(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
 
 
 def lane_failed_retry(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
-    nzb, incoming = stage_job(lane, store, GOOD, GOOD)
-    withheld = sorted(store.articles)[len(store.articles) // 2]
-    store.withhold(withheld)
+    nzb, incoming, data_ids = stage_job(lane, store, GOOD, GOOD)
+    # More missing data than the 10% par2 recovery can repair: real SABnzbd's real par2 repair must FAIL the job.
+    withheld = data_ids[1:5]
+    for message_id in withheld:
+        store.withhold(message_id)
     host = boot_with_sab(lane, sab)
     try:
         before, before_files = lane.view("before"), m17.files_state(lane.artist_path)
         nzo = sab.add(nzb)
         slot = sab.wait(nzo, ("Completed", "Failed"))
         note(f"SAB_FAILED_SLOT {redact(json.dumps({k: slot.get(k) for k in ('status', 'fail_message', 'storage')}))}")
-        check(slot["status"] == "Failed" and withheld in store.missing, "a genuinely missing article made REAL SABnzbd fail the job (history Failed)")
+        check(slot["status"] == "Failed" and any(w in store.missing for w in withheld),
+              f"missing articles beyond par2 recovery made REAL SABnzbd fail the job (history Failed: {slot.get('fail_message')})")
         mark = len(host.text())
         wait_cycles(host, mark, 2)
         check("NATIVE_IMPORT" not in host.text() and lane.view("after-failed") == before and m17.files_state(lane.artist_path) == before_files,
@@ -295,7 +314,7 @@ def lane_failed_retry(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
 
 
 def lane_restarts(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
-    nzb, incoming = stage_job(lane, store, GOOD, GOOD)
+    nzb, incoming, data_ids = stage_job(lane, store, GOOD, GOOD)
     store.delay = 1.5
     host = boot_with_sab(lane, sab)
     try:
@@ -334,8 +353,8 @@ def lane_restarts(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
 
 
 def lane_paths(lane: Lane, sab: RealSab, store: ArticleStore, outside: Path) -> None:
-    good_nzb, incoming = stage_job(lane, store, GOOD, GOOD)
-    outside_nzb, _ = stage_job(lane, store, GOOD, GOOD + " outside")
+    good_nzb, incoming, _ = stage_job(lane, store, GOOD, GOOD)
+    outside_nzb, _, _ = stage_job(lane, store, GOOD, GOOD + " outside")
     host = lane.boot()
     try:
         connect_lidarr(host, "Crescendarr Synthetic SABnzbd outside", "music-outside")
@@ -357,7 +376,7 @@ def lane_paths(lane: Lane, sab: RealSab, store: ArticleStore, outside: Path) -> 
         refused = [e for e in registry(lane).values() if e["state"] == "RefusedUnsafePath"]
         check(refused and refused[0]["folder"] == slot["storage"], "the refusal is recorded durably with the offending path")
         # Same job NAME, different content (the other edition's files): a different SAB job and folder, never confused.
-        same_nzb, _ = stage_job(lane, store, WRONG, GOOD)
+        same_nzb, _, _ = stage_job(lane, store, WRONG, GOOD)
         same_nzo = sab.add(same_nzb)
         same = sab.wait(same_nzo, ("Completed", "Failed"))
         check(same_nzo != good_nzo and Path(same["storage"]) != Path(good["storage"]), f"same-name job got its own SAB id and folder ({Path(same['storage']).name})")
@@ -370,6 +389,34 @@ def lane_paths(lane: Lane, sab: RealSab, store: ArticleStore, outside: Path) -> 
               f"registry identity is folder + content, not display name: {states}")
         check(lane.view("final") != before, "the good job was imported")
         no_delete_and_intact(lane, sab, good_nzo, Path(good["storage"]), incoming)
+    finally:
+        host.stop()
+
+
+def lane_unverified_missing(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
+    """REAL SABnzbd behaviour found in M22: an NZB WITHOUT par2 and with a missing article finishes as Completed (no
+    verification possible), and Lidarr's client exposes no article-health signal. Crescendarr must refuse to import it."""
+    nzb, incoming, data_ids = stage_job(lane, store, GOOD, GOOD, par2=False)
+    store.withhold(data_ids[2])
+    host = boot_with_sab(lane, sab)
+    try:
+        before, before_files = lane.view("before"), m17.files_state(lane.artist_path)
+        nzo = sab.add(nzb)
+        slot = sab.wait(nzo, ("Completed", "Failed"))
+        note(f"SAB_UNVERIFIED_SLOT {redact(json.dumps({k: slot.get(k) for k in ('status', 'fail_message', 'storage')}))}")
+        check(slot["status"] == "Completed" and data_ids[2] in store.missing, "REAL SABnzbd reported Completed although an article was missing (no par2 to verify)")
+        folder = Path(slot["storage"])
+        damaged = {p.name: sha(p) for p in folder.iterdir() if p.is_file()}
+        check(damaged != incoming, "the completed folder really differs from the posted files (damaged download)")
+        mark = len(host.text())
+        wait_cycles(host, mark, 2)
+        text = host.text()[mark:]
+        check("NATIVE_IMPORT" not in text, "the damaged 'Completed' download was NOT imported")
+        check(re.search(r"failed the integrity check", text) is not None, "the refusal names the integrity failure")
+        check(lane.view("after") == before and m17.files_state(lane.artist_path) == before_files, "zero row, link, lyric or byte change")
+        reg = registry(lane)
+        check(reg and next(iter(reg.values()))["state"] == "Blocked", "the registry records the download as Blocked (never handled successfully)")
+        check(sab.job(nzo)[0] == "Completed", "the SAB job is untouched")
     finally:
         host.stop()
 
@@ -392,7 +439,8 @@ def main() -> int:
         sab = RealSab(sab_dir, python, base, lane.watch, {"music-outside": str(outside)})
         sab.start()
         {"sab-real-happy": lambda: lane_happy(lane, sab, store), "sab-real-failed-retry": lambda: lane_failed_retry(lane, sab, store),
-         "sab-real-restarts": lambda: lane_restarts(lane, sab, store), "sab-real-paths": lambda: lane_paths(lane, sab, store, outside)}[name]()
+         "sab-real-restarts": lambda: lane_restarts(lane, sab, store), "sab-real-paths": lambda: lane_paths(lane, sab, store, outside),
+         "sab-real-unverified-missing": lambda: lane_unverified_missing(lane, sab, store)}[name]()
         note(f"SAB_STATES {sab.states}")
         note(f"NNTP served={len(store.served)} missing={len(store.missing)}")
         note(f"M22_LANE_COMPLETE {name}")
