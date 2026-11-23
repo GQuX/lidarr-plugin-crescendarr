@@ -112,7 +112,11 @@ def lane_server_loss(lane: Lane) -> None:
         host.push(import_body(plan))
         host.wait_log(rf"FAULT_PAUSED post-move-{tid}", deadline=180, start=start)
         SHARE.signal_server(signal.SIGSTOP)
-        note("SMB_SERVER_FROZEN (SIGSTOP) at the post-move/pre-row boundary")
+        import subprocess
+        states = subprocess.run(["ps", "-o", "pid,stat,args", "-C", "smbd"], capture_output=True, text=True).stdout
+        note("SMB_SERVER_FROZEN (SIGSTOP) at the post-move/pre-row boundary: " + " | ".join(states.splitlines()))
+        rows = [l.split() for l in states.splitlines()[1:] if l.strip()]
+        check(rows and all(r[1].startswith("T") for r in rows), "every smbd process is stopped (state T)")
         (lane.base / "faults" / f"release-post-move-{tid}").write_text("go\n")
         outcome = host.wait_log(r"IMPORT_OUTCOME[^\n]*", start=start, deadline=420).group(0)
         note("OUTCOME_WHILE_UNREACHABLE " + outcome)

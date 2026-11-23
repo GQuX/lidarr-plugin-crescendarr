@@ -92,7 +92,9 @@ class CifsShare:
                            f"\n--- smbd output ---\n{output}\n--- smbd log ---\n{logs}")
 
     def server_pids(self) -> list[int]:
-        out = subprocess.run(["pgrep", "-f", f"smbd -D -s {self.conf}"], capture_output=True, text=True).stdout.split()
+        """EVERY smbd process. Samba retitles its per-connection children ("smbd: client [...]"), so matching the parent's
+        command line alone left the serving child running. Only this disposable server runs on the runner."""
+        out = subprocess.run(["pgrep", "smbd"], capture_output=True, text=True).stdout.split()
         return [int(p) for p in out]
 
     def signal_server(self, sig: signal.Signals) -> None:
