@@ -1,0 +1,154 @@
+name: M25 audit-only beta candidate (reproducible build, read-only proof, packaging)
+
+# M25 (#62). Builds the AUDIT-ONLY flavor of the one Crescendarr plugin twice and requires byte-identical output, proves
+# with a metadata/IL scan that it has no library-mutation capability (and that the scan rejects the writer build), packages
+# a deterministic candidate zip with SHA256SUMS, then runs it on the official SHA-256-pinned stock Lidarr daemon with a
+# synthetic library. The candidate is a CI ARTIFACT ONLY: nothing is published, released or installed anywhere else.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tools/audit-scan/**'
+      - 'tools/package_audit_beta.py'
+      - 'tools/experiments/m17-seeder/**'
+      - 'tools/experiments/run_disposable_m1[78].py'
+      - 'tools/experiments/run_disposable_m2[05].py'
+      - 'docs/audit-beta/**'
+      - '.github/workflows/m25-audit-beta.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LIDARR_URL: https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz
+  LIDARR_SHA256: fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$archive" "$LIDARR_URL"
+          printf '%s  %s\n' "$LIDARR_SHA256" "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/lidarr"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/lidarr"
+          echo "bin=$(dirname "$(find "${RUNNER_TEMP}/lidarr" -type f -name Lidarr.Core.dll -print -quit)")" >> "$GITHUB_OUTPUT"
+      - name: Build the audit-only flavor twice from clean and require byte-identical DLLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --short=12 HEAD)"
+          build() {
+            rm -rf src/Crescendarr.Lidarr.AuditPlugin/bin src/Crescendarr.Lidarr.AuditPlugin/obj
+            dotnet build src/Crescendarr.Lidarr.AuditPlugin/Crescendarr.Lidarr.AuditPlugin.csproj -c Release --nologo --output "$1" \
+              -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}" -p:CrescendarrCommit="$commit" -p:CrescendarrChannel="$2"
+          }
+          build "${RUNNER_TEMP}/audit-a" audit-beta.1
+          build "${RUNNER_TEMP}/audit-b" audit-beta.1
+          build "${RUNNER_TEMP}/audit-next" audit-beta.2
+          a=$(sha256sum "${RUNNER_TEMP}/audit-a/Lidarr.Plugin.Crescendarr.dll" | cut -d' ' -f1)
+          b=$(sha256sum "${RUNNER_TEMP}/audit-b/Lidarr.Plugin.Crescendarr.dll" | cut -d' ' -f1)
+          echo "REPRODUCIBLE_DLL first=$a second=$b" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$a" = "$b"
+          ls "${RUNNER_TEMP}/audit-a"
+      - name: Read-only proof - metadata/IL scan of the audit DLL (must pass) and of the writer DLL (must be rejected)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build tools/audit-scan/Crescendarr.AuditScan.csproj -c Release --nologo --output "${RUNNER_TEMP}/scan"
+          dotnet "${RUNNER_TEMP}/scan/Crescendarr.AuditScan.dll" "${RUNNER_TEMP}/audit-a/Lidarr.Plugin.Crescendarr.dll" | tee "${RUNNER_TEMP}/audit-scan.txt"
+          dotnet build src/Crescendarr.Lidarr.Plugin/Crescendarr.Lidarr.Plugin.csproj -c Release --nologo --output "${RUNNER_TEMP}/writer" \
+            -p:CrescendarrDisposableHostBuild=true -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}"
+          if dotnet "${RUNNER_TEMP}/scan/Crescendarr.AuditScan.dll" "${RUNNER_TEMP}/writer/Lidarr.Plugin.Crescendarr.dll" > "${RUNNER_TEMP}/writer-scan.txt"; then
+            echo "The scan did not reject the WRITER build: it cannot be trusted" >&2; exit 1
+          fi
+          echo "WRITER_BUILD_REJECTED $(grep -c '^VIOLATION' "${RUNNER_TEMP}/writer-scan.txt") violations (positive control)" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E 'AUDIT_SCAN|FILE_MUTATOR' "${RUNNER_TEMP}/audit-scan.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Package twice and require byte-identical candidate zips
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/package_audit_beta.py "${RUNNER_TEMP}/audit-a/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate"
+          python3 tools/package_audit_beta.py "${RUNNER_TEMP}/audit-b/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate-again"
+          cmp "${RUNNER_TEMP}/candidate/crescendarr-audit-beta-0.25.0-audit-beta.1.zip" "${RUNNER_TEMP}/candidate-again/crescendarr-audit-beta-0.25.0-audit-beta.1.zip"
+          python3 tools/package_audit_beta.py "${RUNNER_TEMP}/audit-next/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.2 "${RUNNER_TEMP}/candidate"
+          cp "${RUNNER_TEMP}/audit-scan.txt" "${RUNNER_TEMP}/candidate/"
+          ( cd "${RUNNER_TEMP}/candidate" && sha256sum *.zip > SHA256SUMS && cat SHA256SUMS ) | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crescendarr-audit-beta-candidate
+          path: ${{ runner.temp }}/candidate/
+          retention-days: 14
+
+  daemon:
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [audit-readonly, package-lifecycle]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/download-artifact@v4
+        with:
+          name: crescendarr-audit-beta-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$archive" "$LIDARR_URL"
+          printf '%s  %s\n' "$LIDARR_SHA256" "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/lidarr"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/lidarr"
+          echo "bin=$(dirname "$(find "${RUNNER_TEMP}/lidarr" -type f -name Lidarr.Core.dll -print -quit)")" >> "$GITHUB_OUTPUT"
+      - name: Verify the candidate and extract the DLL that will be tested
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/candidate" && sha256sum --check SHA256SUMS
+          python3 -c "import zipfile,sys; z=zipfile.ZipFile('crescendarr-audit-beta-0.25.0-audit-beta.1.zip'); open('${RUNNER_TEMP}/candidate-dll.dll','wb').write(z.read('Lidarr.Plugin.Crescendarr.dll'))"
+          mkdir -p "${RUNNER_TEMP}/candidate-plugin" && mv "${RUNNER_TEMP}/candidate-dll.dll" "${RUNNER_TEMP}/candidate-plugin/Lidarr.Plugin.Crescendarr.dll"
+      - name: Build the separate test-only fixture seeder
+        shell: bash
+        run: |
+          dotnet build tools/experiments/m17-seeder/Crescendarr.M17FixtureSeeder.csproj -c Release --nologo --output "${RUNNER_TEMP}/seeder" \
+            -p:CrescendarrDisposableHostBuild=true -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}"
+      - name: Stock daemon lane (${{ matrix.scenario }})
+        shell: bash
+        run: |
+          if [ "${{ matrix.scenario }}" = package-lifecycle ]; then artifact="${RUNNER_TEMP}/candidate"; else artifact="${RUNNER_TEMP}/candidate-plugin/Lidarr.Plugin.Crescendarr.dll"; fi
+          python3 tools/experiments/run_disposable_m25.py "${{ steps.runtime.outputs.bin }}" "$artifact" \
+            "${RUNNER_TEMP}/seeder/Lidarr.Plugin.CrescendarrFixtureSeeder.dll" "${{ matrix.scenario }}"
+      - name: Upload evidence (logs, DB copies, audit state; synthetic data only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m25-${{ matrix.scenario }}-evidence
+          path: |
+            ${{ runner.temp }}/m25-*-evidence.txt
+            ${{ runner.temp }}/crescendarr-m25-*/boot*.log
+            ${{ runner.temp }}/crescendarr-m25-*/config/crescendarr-audit/**
+            ${{ runner.temp }}/crescendarr-m25-*/db/**
+          retention-days: 7

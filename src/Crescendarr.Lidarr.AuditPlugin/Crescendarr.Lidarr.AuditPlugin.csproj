@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- M25 AUDIT-ONLY BETA build of the ONE Crescendarr plugin (same assembly identity as the writer build; install one).
+       It compiles ONLY read-only sources: the pure Crescendarr.Core planner/registry policy, the host-independent Disk
+       primitives, the read-only HostAdapter and the audit files in this folder. The importer, recovery, salvage, operator
+       approval and every writer command (src/Crescendarr.Lidarr.Plugin/{Executors,ImportBoundary,Operator,Automation,
+       CrescendarrPlugin,HostAdapter.Synthetic}.cs) are NOT part of this assembly, and tools/audit-scan rejects any reference
+       to a Lidarr library-mutation API. CRESCENDARR_AUDIT_BUILD additionally confines every Disk write to the audit
+       state folder. -->
+  <PropertyGroup>
+    <AssemblyName>Lidarr.Plugin.Crescendarr</AssemblyName>
+    <RootNamespace>NzbDrone.Core.Plugins.Crescendarr</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <DefineConstants>$(DefineConstants);CRESCENDARR_AUDIT_BUILD</DefineConstants>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CA1031;CA1062;CA1303;CA1305;CA1307;CA1309;CA1310;CA1822;CA1848;CA2254;CA1716;CA1720</NoWarn>
+    <!-- Reproducible identity: same inputs => byte-identical DLL (verified twice in CI). -->
+    <CrescendarrVersion Condition="'$(CrescendarrVersion)' == ''">0.25.0</CrescendarrVersion>
+    <CrescendarrChannel Condition="'$(CrescendarrChannel)' == ''">audit-beta.1</CrescendarrChannel>
+    <CrescendarrCommit Condition="'$(CrescendarrCommit)' == ''">unknown</CrescendarrCommit>
+    <Version>$(CrescendarrVersion)</Version>
+    <AssemblyVersion>$(CrescendarrVersion).0</AssemblyVersion>
+    <FileVersion>$(CrescendarrVersion).0</FileVersion>
+    <InformationalVersion>$(CrescendarrVersion)-$(CrescendarrChannel)+$(CrescendarrCommit)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildThisFileDirectory)..\..\=/_/</PathMap>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Product>Crescendarr audit-only beta</Product>
+    <Description>Read-only Lidarr plugin: previews per-track upgrades for completed downloads. It never writes library audio, lyrics or track links.</Description>
+  </PropertyGroup>
+  <Target Name="RejectUnconfiguredAuditBuild" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(LidarrBinDir)' == ''" Text="Set -p:LidarrBinDir=/ABSOLUTE/PATH/TO/THE/PINNED/LIDARR/BIN (official v3.1.6.5079)" />
+  </Target>
+  <ItemGroup>
+    <Compile Include="../Crescendarr.Core/**/*.cs" Exclude="../Crescendarr.Core/obj/**;../Crescendarr.Core/bin/**" LinkBase="Core" />
+    <Compile Include="../Crescendarr.Lidarr.Plugin/Disk.cs" Link="Shared/Disk.cs" />
+    <Compile Include="../Crescendarr.Lidarr.Plugin/HostAdapter.cs" Link="Shared/HostAdapter.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.IO.Abstractions"><HintPath>$(LidarrBinDir)/System.IO.Abstractions.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="FluentValidation"><HintPath>$(LidarrBinDir)/FluentValidation.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

@@ -142,6 +142,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// <summary>M23: the folder accepts a durable write and a delete right now (a read-only or failing mount does not).</summary>
         public static string WriteProbeProblem(string folder)
         {
+#if CRESCENDARR_AUDIT_BUILD
+            AuditBarrier.RequireStatePath(Path.Combine(folder, "probe"));
+#endif
             var probe = Path.Combine(folder, ".crescendarr-write-probe-" + Guid.NewGuid().ToString("N"));
             try
             {
@@ -189,6 +192,10 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// </summary>
         private static void WriteAtomically(string path, bool replace, Action<FileStream> writer)
         {
+#if CRESCENDARR_AUDIT_BUILD
+            // Audit-only build: the ONLY writable place is its own state folder (independent of any setting).
+            AuditBarrier.RequireStatePath(path);
+#endif
             if (!replace && IsLink(path)) throw new CrescendarrGuardException($"Refusing to write over a link: {path}");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             var temporary = path + ".partial-" + Guid.NewGuid().ToString("N");
@@ -218,6 +225,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
         public static void WriteDurable(string path, string text, bool replace) => WriteDurable(path, Encoding.UTF8.GetBytes(text), replace);
 
+#if !CRESCENDARR_AUDIT_BUILD
+        // Writer build only: the audit-only build has no copy into any library or staging location.
         /// <summary>
         /// Verified no-overwrite copy with bounded memory. Hash the actual bytes as they are streamed to the temporary
         /// file, fail before rename if they differ from the immutable expected content, then re-read the placed file.
@@ -247,5 +256,6 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             });
             if (Sha(destination) != expectedSha) throw new CrescendarrGuardException($"Copy verification failed: {destination}");
         }
+#endif
     }
 }

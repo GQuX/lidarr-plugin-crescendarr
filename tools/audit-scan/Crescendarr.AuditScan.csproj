@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- M25: reads (never loads) a plugin DLL and proves the audit-only build has no library-mutation capability. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1031;CA1303;CA1307;CA1310;CA1822;CA1861;CA2201;CA1305</NoWarn>
+  </PropertyGroup>
+</Project>
