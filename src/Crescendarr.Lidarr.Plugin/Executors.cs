@@ -938,9 +938,18 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return null;
         }
 
+        /// <summary>
+        /// The destination stock will use: the same TrackFile fields ImportApprovedTracks sets before TrackFileMovingService
+        /// builds the path (M21: with renaming ON, stock naming dereferences Quality and reads MediaInfo / ReleaseGroup).
+        /// Any remaining difference is caught by the bound-destination check and the post-import byte verification.
+        /// </summary>
         private string Destination(ImportDecision<LocalTrack> stock, Artist artist, Album album) =>
             Path.GetFullPath(_fileNames.BuildTrackFilePath(stock.Item.Tracks, artist, album,
-                new TrackFile { Path = stock.Item.Path, SceneName = stock.Item.SceneName }, Path.GetExtension(stock.Item.Path)));
+                new TrackFile
+                {
+                    Path = stock.Item.Path, SceneName = stock.Item.SceneName, Size = stock.Item.Size, Quality = stock.Item.Quality,
+                    MediaInfo = stock.Item.FileTrackInfo?.MediaInfo, ReleaseGroup = stock.Item.ReleaseGroup
+                }, Path.GetExtension(stock.Item.Path)));
 
         private static LyricFile NewLyricRow(OperationContext context, int albumId, int trackFileId, string relativePath) => new LyricFile
         {

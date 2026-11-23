@@ -142,7 +142,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
                 }
 
                 var ext = superior ? ".flac" : ".mp3";
-                var path = _fileNames.BuildTrackFilePath(new List<Track> { track }, artist, album, new TrackFile { Path = "seed" + ext }, ext);
+                var path = _fileNames.BuildTrackFilePath(new List<Track> { track }, artist, album, new TrackFile { Path = "seed" + ext, Quality = new QualityModel(superior ? Quality.FLAC : Quality.MP3_192) }, ext);
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 File.WriteAllBytes(path, superior ? SyntheticFlac(Seconds(i), out _) : SilentMp3(192, Seconds(i), out _));
                 Tag(path, f, release.ForeignReleaseId, 2);
