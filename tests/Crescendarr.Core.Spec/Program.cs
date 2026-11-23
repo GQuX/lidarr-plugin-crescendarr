@@ -146,7 +146,9 @@ static void Mp3Integrity()
     var v1 = new byte[128]; v1[0] = (byte)'T'; v1[1] = (byte)'A'; v1[2] = (byte)'G';
     Expect(AudioIntegrity.Mp3Problem(audio) is null, "bare frames are continuous");
     Expect(AudioIntegrity.Mp3Problem(id3.Concat(audio).Concat(v1).ToArray()) is null, "ID3v2 + frames + ID3v1 is continuous");
-    Expect(AudioIntegrity.Mp3Problem(id3.Concat(audio[..(audio.Length - 300)]).ToArray()) is null, "a truncated LAST frame is tolerated");
+    Expect(AudioIntegrity.Mp3Problem(id3.Concat(audio[..(audio.Length - 300)]).ToArray()) is not null, "a truncated last MPEG frame must be refused");
+    Expect(AudioIntegrity.Mp3Problem(audio[..^1]) is not null, "a one-byte-truncated final MPEG frame must be refused");
+    Expect(AudioIntegrity.Mp3Problem(audio.Concat(new byte[] { 1, 2, 3 }).ToArray()) is not null, "trailing bytes without a complete frame must be refused");
     var hole = id3.Concat(audio).ToArray();
     Array.Clear(hole, id3.Length + 835 * 50, 120_000 > 835 * 40 ? 835 * 40 : 120_000);
     Expect(AudioIntegrity.Mp3Problem(hole) is not null, "a zero-filled hole (missing article) is refused");
