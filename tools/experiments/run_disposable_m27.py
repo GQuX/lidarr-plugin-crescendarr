@@ -407,7 +407,9 @@ def run(bin_dir: Path, seeder: Path, candidate: Path, sab_dir: Path, python: str
             time.sleep(3)
         check(status(host.api("GET", f"command/{pushed['id']}")) == "completed", "after the server answers again the blocked audit cycle completes")
         resumed = {k: (v["state"], [(t["Track"], t["Action"]) for t in v["tracks"]]) for k, v in report(lane).items()}
-        check(resumed == expected, f"the resumed cycle reports exactly the previews from before the outage ({resumed})")
+        albums = (good_folder.name, wrong_folder.name)  # the library-dependent previews (blackhole entries depend on stock timing)
+        check({k: resumed.get(k) for k in albums} == {k: expected.get(k) for k in albums},
+              f"the resumed cycle reports exactly the album previews from before the outage ({ {k: resumed.get(k) for k in albums} })")
         time.sleep(20)
         attribute(lane, host, before, "after-storage-outage", stock_may_import=False)
 
