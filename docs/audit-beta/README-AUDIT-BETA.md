@@ -41,7 +41,15 @@ prevent any of that.
 | Platform | **Linux** only (including Docker images). On other operating systems the plugin stays inactive and reports an error. |
 | Storage | Local disks were tested. A kernel-mounted SMB/CIFS library was tested with the write-enabled build in M23. See *Limitations*. |
 
-## Install
+## Installation options
+
+**GitHub URL installation (pending release publication):** The native installer-compatible audit-only package is being validated under [M26](../release-gates/m26-native-installer.md). Only **after an approved, published GitHub pre-release** should you use Lidarr's **System > Plugins > Install** with:
+
+`https://github.com/GQuX/lidarr-plugin-crescendarr`
+
+Lidarr will download the compatible `net8.0.zip` release asset to its plugin folder and ask for a restart. With no published release, the URL **does not install anything**. After restart, verify the audit-only build identity in logs and leave its Connect mode Disabled until you intend to preview.
+
+**Manual install (CI artifact only, for controlled testing):**
 
 1. Verify the download:
 
