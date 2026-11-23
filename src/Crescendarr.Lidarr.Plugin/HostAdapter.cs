@@ -147,6 +147,28 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 });
         }
 
+        /// <summary>
+        /// M18, OPERATOR-APPROVED recovery only: the stock disk-scan decision (existing file, IncludeExisting for identity)
+        /// for ONE file already at its final library path. Only the decision for exactly that path is returned, so the
+        /// album's other tracked files are never re-imported (no album-wide cascade, no lyric recycling).
+        /// </summary>
+        public ImportDecision<LocalTrack> DecideExistingLibraryFile(Artist artist, string path)
+        {
+            var files = _diskScan.GetAudioFiles(Path.GetDirectoryName(path), false).Where(f => f.FullName == path).ToList();
+            if (files.Count != 1) return null;
+            var decisions = _decisions.GetImportDecisions(files, new IdentificationOverrides { Artist = artist }, null,
+                new ImportDecisionMakerConfig
+                {
+                    Filter = FilterFilesType.None,
+                    NewDownload = false,
+                    SingleRelease = false,
+                    IncludeExisting = true,
+                    AddNewArtists = false
+                });
+            var matching = decisions.Where(d => d.Item.Path == path).ToList();
+            return matching.Count == 1 ? matching[0] : null;
+        }
+
         public Observation Observe(DownloadClientItem item, int clientId, string watchFolder, string decisionFolder = null)
         {
             var o = new Observation { Item = item, ClientDefinitionId = clientId, WatchFolder = watchFolder, Folder = Path.GetFullPath(item.OutputPath.FullPath).TrimEnd('/') };

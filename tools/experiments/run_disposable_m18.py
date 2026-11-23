@@ -381,14 +381,14 @@ def lane_negatives(lane: Lane) -> None:
     finally:
         host.stop()
     snapshot = lane.base.with_name(lane.base.name + "-snapshot")
-    shutil.copytree(lane.base, snapshot, symlinks=True, ignore=shutil.ignore_patterns("db", "boot*.log", "logs"))
+    shutil.copytree(lane.base, snapshot, symlinks=True, ignore=shutil.ignore_patterns("db", "boot*.log", "logs", "clr-debug-pipe-*", "dotnet-diagnostic-*"))
     lyrics = json.loads((lane.op_root() / "album-lyrics.json").read_text())
     backup2 = Path([l for l in lyrics if l["RelativePath"] == lane.lyric(2).name][0]["backup"])
     original_lyric_bytes = (lane.base / "recycle").rglob(lane.lyric(2).name).__next__().read_bytes()
 
     def restore() -> None:
         for child in list(lane.base.iterdir()):
-            if child.name == "db" or child.name.startswith("boot"):
+            if child.name == "db" or child.name.startswith(("boot", "clr-debug-pipe-", "dotnet-diagnostic-")):
                 continue
             shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
         for child in snapshot.iterdir():
