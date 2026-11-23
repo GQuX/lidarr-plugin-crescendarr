@@ -10,6 +10,7 @@ on:
       - 'src/**'
       - 'tools/audit-scan/**'
       - 'tools/package_audit_beta.py'
+      - 'tools/package_lidarr_native.py'
       - 'tools/experiments/m17-seeder/**'
       - 'tools/experiments/run_disposable_m1[78].py'
       - 'tools/experiments/run_disposable_m2[05].py'
@@ -85,6 +86,23 @@ jobs:
           python3 tools/package_audit_beta.py "${RUNNER_TEMP}/audit-b/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate-again"
           cmp "${RUNNER_TEMP}/candidate/crescendarr-audit-beta-0.25.0-audit-beta.1.zip" "${RUNNER_TEMP}/candidate-again/crescendarr-audit-beta-0.25.0-audit-beta.1.zip"
           python3 tools/package_audit_beta.py "${RUNNER_TEMP}/audit-next/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.2 "${RUNNER_TEMP}/candidate"
+          # M26: same scanned audit DLL, now also packaged for Lidarr's native GitHub-URL installer.
+          # No tag or release is published here; the asset stays in a CI artifact until owner approval.
+          python3 tools/package_lidarr_native.py "${RUNNER_TEMP}/audit-a/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate"
+          python3 tools/package_lidarr_native.py "${RUNNER_TEMP}/audit-b/Lidarr.Plugin.Crescendarr.dll" 0.25.0-audit-beta.1 "${RUNNER_TEMP}/candidate-again"
+          cmp "${RUNNER_TEMP}/candidate/Crescendarr-v0.25.0-audit-beta.1.net8.0.zip" "${RUNNER_TEMP}/candidate-again/Crescendarr-v0.25.0-audit-beta.1.net8.0.zip"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, zipfile
+          root = Path(__import__('os').environ['RUNNER_TEMP'])
+          dll = (root / 'audit-a/Lidarr.Plugin.Crescendarr.dll').read_bytes()
+          pkg = root / 'candidate/Crescendarr-v0.25.0-audit-beta.1.net8.0.zip'
+          with zipfile.ZipFile(pkg) as z:
+              assert z.namelist() == ['Lidarr.Plugin.Crescendarr.dll'], z.namelist()
+              assert z.read('Lidarr.Plugin.Crescendarr.dll') == dll
+          assert hashlib.sha256(pkg.read_bytes()).hexdigest() in (root / 'candidate' / (pkg.name + '.sha256')).read_text()
+          print('M26_NATIVE_ASSET_OK net8.0.zip only pre-scanned DLL, deterministic, checksum verified')
+          PY
           cp "${RUNNER_TEMP}/audit-scan.txt" "${RUNNER_TEMP}/candidate/"
           ( cd "${RUNNER_TEMP}/candidate" && sha256sum *.zip > SHA256SUMS && cat SHA256SUMS ) | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
