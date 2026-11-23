@@ -302,7 +302,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var ownedTracks = o.AlbumTracks.Where(t => t.TrackFileId > 0).OrderBy(t => t.Id).ToList();
             var fileIds = ownedTracks.Select(t => t.TrackFileId).Distinct().ToList();
             var sharersByFile = (fileIds.Count == 0 ? new List<Track>() : _trackRepository.GetTracksByFileId(fileIds))
-                .GroupBy(t => t.TrackFileId).ToDictionary(g => g.Key, g => g.ToList());
+                .GroupBy(t => t.TrackFileId).ToDictionary(g => g.Key, g => g.OrderBy(t => t.Id).ToList());
+            // Sharer order feeds the plan fingerprint (RecordingIds are hashed in order), and SQL gives no ORDER BY
+            // guarantee for an IN query, so fix it by track ID: the order the per-file index lookup produced before.
             foreach (var track in ownedTracks)
             {
                 o.TrackFiles.TryGetValue(track.TrackFileId, out var file);
