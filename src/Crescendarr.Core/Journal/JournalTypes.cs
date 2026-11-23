@@ -74,6 +74,41 @@ public sealed record TrackBinding(
     string BackupAudioPath,
     LyricBinding? Lyric);
 
+/// <summary>
+/// M18: a missing track the operation adds (no original file). The host import that places
+/// <see cref="Incoming"/> at <see cref="DestinationPath"/> and inserts its row is journaled like an upgrade.
+/// </summary>
+public sealed record AdditionBinding(
+    int TrackId,
+    string RecordingMbid,
+    string DestinationPath,
+    string IncomingPath,
+    ContentId Incoming);
+
+/// <summary>
+/// M18: an album track the operation must NOT change (for example a superior original). Its audio bytes must
+/// stay identical at <see cref="Path"/>, and the track must stay linked to a row at that path. The row ID may be
+/// replaced by a host rescan; identity is track + recording + path + bytes, never the stored row ID.
+/// </summary>
+public sealed record KeptTrackBinding(
+    int TrackId,
+    string RecordingMbid,
+    int TrackFileId,
+    string Path,
+    ContentId Content);
+
+/// <summary>
+/// M18: every lyric registered in the album before the operation, with an independent verified backup. After all
+/// album audio is linked, each must exist with exactly these bytes and be registered once to its track's CURRENT row.
+/// </summary>
+public sealed record AlbumLyricBinding(
+    int LyricFileId,
+    int TrackId,
+    string RelativePath,
+    string Path,
+    ContentId Content,
+    string BackupPath);
+
 /// <summary>Optional link to the read-only download inventory (M10).</summary>
 public sealed record DownloadBinding(int ClientDefinitionId, string DownloadId, string? InventoryEvidenceDigest);
 
@@ -95,7 +130,34 @@ public sealed record OperationBinding(
     string StagingRoot,
     string OperationRoot,
     ImmutableArray<TrackBinding> Tracks,
-    string ArtistRoot);
+    string ArtistRoot)
+{
+    /// <summary>M18: missing tracks added by this operation (journaled host imports).</summary>
+    public ImmutableArray<AdditionBinding> Additions { get; init; } = ImmutableArray<AdditionBinding>.Empty;
+
+    /// <summary>M18: album tracks the operation protects and must leave unchanged.</summary>
+    public ImmutableArray<KeptTrackBinding> Kept { get; init; } = ImmutableArray<KeptTrackBinding>.Empty;
+
+    /// <summary>M18: every registered album lyric, including unselected tracks' lyrics.</summary>
+    public ImmutableArray<AlbumLyricBinding> AlbumLyrics { get; init; } = ImmutableArray<AlbumLyricBinding>.Empty;
+}
+
+public enum AdditionPhase
+{
+    /// <summary>Intent published; the track is unlinked and its destination is free.</summary>
+    Planned = 1,
+
+    /// <summary>Observed complete: incoming bytes at destination, a fresh row linked to the track.</summary>
+    Added = 2,
+}
+
+/// <summary>Mutable progress of one addition, changed only by <see cref="JournalEngine"/>.</summary>
+public sealed record AdditionProgress(
+    int TrackId,
+    AdditionPhase Phase,
+    bool InFlight,
+    int InterruptedAttempts,
+    int? NewTrackFileId);
 
 /// <summary>Mutable progress of one track, changed only by <see cref="JournalEngine"/>.</summary>
 public sealed record TrackProgress(
@@ -115,14 +177,30 @@ public sealed record OperationManifest(
     string BindingDigest,
     ImmutableArray<TrackProgress> Progress)
 {
-    public const int FormatVersion = 2;
+    /// <summary>Version 3 (M18) adds additions, kept tracks and album lyrics to the one operation journal.</summary>
+    public const int FormatVersion = 3;
+
+    /// <summary>M18: progress of every bound addition, in binding order.</summary>
+    public ImmutableArray<AdditionProgress> Additions { get; init; } = ImmutableArray<AdditionProgress>.Empty;
 
     public TrackProgress ProgressFor(int trackId) => Progress.Single(p => p.TrackId == trackId);
 
     public TrackBinding BindingFor(int trackId) => Binding.Tracks.Single(t => t.TrackId == trackId);
 
+    public AdditionProgress AdditionFor(int trackId) => Additions.Single(a => a.TrackId == trackId);
+
+    public AdditionBinding AdditionBindingFor(int trackId) => Binding.Additions.Single(a => a.TrackId == trackId);
+
+    public bool IsAddition(int trackId) => !Binding.Additions.IsDefaultOrEmpty && Binding.Additions.Any(a => a.TrackId == trackId);
+
     /// <summary>The single step currently declared in flight across the whole operation, if any.</summary>
     public TrackProgress? InFlightTrack => Progress.SingleOrDefault(p => p.InFlight is not null);
+
+    /// <summary>The addition currently declared in flight, if any.</summary>
+    public AdditionProgress? InFlightAddition => Additions.IsDefaultOrEmpty ? null : Additions.SingleOrDefault(a => a.InFlight);
+
+    /// <summary>True when any step (track or addition) is declared in flight.</summary>
+    public bool AnyInFlight => InFlightTrack is not null || InFlightAddition is not null;
 }
 
 /// <summary>Thrown for any transition the journal does not allow. Callers must treat it as fail-closed.</summary>

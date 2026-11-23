@@ -46,6 +46,12 @@ internal static class Program
             ("X05 Broader: hardlink planted at the backup path cannot destroy the original", HardlinkedBackupPath),
             ("X06 Review 2: a fresh row created by the operation shared with another track blocks; unrelated sharing does not", SharedFreshTrackFile),
             ("K01 SIGKILL a separate process between local writes; a new process reconciles and recovers", KillAndReopen),
+            ("M01 M18 operation bindings: additions, kept tracks and album lyrics validate strictly", M18Specs.Validation),
+            ("M02 M18 additions are journaled after every replacement; fresh IDs; v3 codec round trip and forged states", M18Specs.Transitions),
+            ("M03 M18 whole operation (upgrade, kept, add, album lyrics) completes; nothing recycled", M18Specs.HappyPath),
+            ("M04 M18 post-move/pre-row crash (upgrade and add): operator approval without a scan; full recovery after the stock cascade", M18Specs.PostMoveCrashThenCascade),
+            ("M05 M18 conflict, corrupt/missing backup, stale row, dangling link, protected bytes, fresh-row aliases: sticky review, zero mutations; unrelated sharing passes", M18Specs.Negatives),
+            ("M06 M18 album lyrics are never re-registered while an album audio file is unregistered", M18Specs.ReattachOnlyWhenAudioLinked),
         };
 
         // Optional local filter (comma-separated name prefixes); CI always runs everything.
@@ -251,8 +257,8 @@ internal static class Program
             ["unknown property"] = good.Replace("\"payload\":{", "\"payload\":{\"x\":1,", StringComparison.Ordinal),
             ["duplicate property"] = good.Replace("\"format\":", "\"format\":\"y\",\"format\":", StringComparison.Ordinal),
             ["numeric enum"] = good.Replace("\"status\":\"Active\"", "\"status\":\"1\"", StringComparison.Ordinal),
-            ["future version"] = good.Replace("\"version\":2", "\"version\":3", StringComparison.Ordinal),
-            ["previous version 1 (no artist root)"] = good.Replace("\"version\":2", "\"version\":1", StringComparison.Ordinal),
+            ["future version"] = good.Replace("\"version\":3", "\"version\":4", StringComparison.Ordinal),
+            ["previous version 2 (no M18 operation bindings)"] = good.Replace("\"version\":3", "\"version\":2", StringComparison.Ordinal),
             ["empty"] = "",
             ["oversize"] = new string(' ', JournalCodec.MaxDocumentChars + 1024),
             ["two in flight"] = Forge(m with { Progress = m.Progress.Select(p => p with { InFlight = p.TrackId == 2 ? JournalStep.DetachLyric : JournalStep.RelinkLyric }).ToImmutableArray() }),
