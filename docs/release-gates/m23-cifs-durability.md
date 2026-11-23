@@ -41,7 +41,7 @@
 | Mount (from `/proc/mounts`) | `cifs rw,vers=3.1.1,cache=strict,soft,serverino,actimeo=1,closetimeo=1,echo_interval=2,retrans=1,rsize=4194304,wsize=4194304` |
 | Placement | library on CIFS; journal, lyric backups, staging, recycle bin, Lidarr DB and download source local (asserted with `findmnt` in every lane) |
 
-**Final head `16e02d1`:** M23 [45208473594](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45208473594) 6/6. All M17-M22 suites and the specs are green on the same head (37/37 jobs).
+**Final head `16e02d1`:** M23 [45208473594](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45208473594) 6/6, repeated green twice on the same head (dispatch runs [45210598176](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45210598176) and [45210620184](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45210620184)): 18/18 lane runs. All M17-M22 suites and the specs are green on the same head (37/37 jobs).
 
 ## Defects found on real CIFS and fixed (each failed before its fix)
 
