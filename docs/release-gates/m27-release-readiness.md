@@ -4,7 +4,15 @@
 
 ## Environment actually tested
 
-Run [45261466845](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45261466845), workflow `m27-lsio-release-readiness.yml`.
+Workflow `m27-lsio-release-readiness.yml`, green in run [45261466845](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45261466845) and on the final head in run [45269774058](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45269774058), with the image pinned by digest.
+
+Harness-only issues fixed along the way, none in the product:
+- the synthetic artist's name tripped a file-name check;
+- new SABnzbd job folders were counted as changed download sources;
+- readiness matched the previous boot's log line;
+- one registry `toomanyrequests` on the image pull.
+
+Each is recorded in the commit history.
 
 | Item | Value |
 |---|---|
