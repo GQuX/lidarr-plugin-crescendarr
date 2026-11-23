@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [three, twelve, three-crash]
+        scenario: [three, twelve, three-crash, three-review]
     steps:
       - uses: actions/checkout@v4
         with:

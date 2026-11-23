@@ -326,7 +326,7 @@ def run(bin_dir: Path, plugin: Path, seeder: Path, scenario: str, base: Path) ->
         if fixture == "three":
             check(re.search(r"track=3:AddMissing:VERIFIED_MISSING_RECORDING", good) is not None, "plan adds missing track 3")
 
-        crash = scenario == "three-crash"
+        crash = scenario in ("three-crash", "three-review")
         if crash:
             (base / "faults" / "pause-after-native-1").write_text("armed\n")
             boot1.push({"name": "CrescendarrImport", "downloadId": field(good, "download"), "planId": field(good, "planId")})
@@ -344,7 +344,7 @@ def run(bin_dir: Path, plugin: Path, seeder: Path, scenario: str, base: Path) ->
         if boot1 is not None:
             boot1.stop()
 
-    if scenario == "three-crash":
+    if scenario in ("three-crash", "three-review"):
         db_state(data, "after-sigkill", base)
         boot2 = Host(bin_dir, data, environment(base, home, crescendarr=True, seeder=False), base / "boot2.log")
         boot2.start("CRESCENDARR READY")
@@ -357,6 +357,10 @@ def run(bin_dir: Path, plugin: Path, seeder: Path, scenario: str, base: Path) ->
             scan = boot2.command({"name": "RescanFolders"})
             check(status(scan) == "completed", "a stock rescan ran BEFORE recovery")
             print_view("AFTER_SCAN_BEFORE_RECOVERY", library_view(db_state(data, "scan-before-recovery", base), seed, release_id))
+            if scenario == "three-review":
+                review_lane(boot2, data, base, seed, release_id)
+                note(f"M17_SCENARIO_COMPLETE {scenario}")
+                return
             recovered = boot2.command({"name": "CrescendarrRecover"})
             note("RECOVERY " + boot2.wait_log(r"IMPORT_OUTCOME[^\n]*").group(0))
             check(status(recovered) == "completed" and "outcome=Completed" in boot2.text(), "recovery command completed the journaled operation")
@@ -385,6 +389,26 @@ def run(bin_dir: Path, plugin: Path, seeder: Path, scenario: str, base: Path) ->
     finally:
         boot3.stop()
     note(f"M17_SCENARIO_COMPLETE {scenario}")
+
+
+def review_lane(host: Host, data: Path, base: Path, seed: dict, release_id: int) -> None:
+    """An unknown change to a bound lyric while the operation is interrupted must yield sticky RequiresReview."""
+    lyric = Path([t for t in seed["tracks"] if t["n"] == 1][0]["lyricPath"])
+    foreign = b"[00:00.00] SOMEONE ELSE EDITED THIS LYRIC WHILE CRESCENDARR WAS DOWN\n"
+    lyric.write_bytes(foreign)
+    before = library_view(db_state(data, "review-before-recovery", base), seed, release_id)
+    first = host.command({"name": "CrescendarrRecover"})
+    check(status(first) == "failed" and "outcome=RequiresReview" in host.text(), "recovery stops at RequiresReview on an unexplained lyric change")
+    check(re.search(r"blockers=\[[^\]]*physical lyric bytes differ", host.text()) is not None, "the M13 reconciler names the conflicting lyric bytes")
+    check(lyric.read_bytes() == foreign, "the unknown lyric bytes were NOT overwritten")
+    after = library_view(db_state(data, "review-after-recovery", base), seed, release_id)
+    check(after == before, "RequiresReview changed no TrackFile, link or lyric row")
+    check(after[3]["trackFileId"] == 0, "the pending add-missing track was NOT imported after review")
+    journal = json.loads(next((base / "crescendarr" / "ops").glob("*/journal.json")).read_text())
+    note(f"REVIEW_JOURNAL status={journal.get('status')} reasons={journal.get('reviewReasons')}")
+    start = len(host.text())
+    host.command({"name": "CrescendarrRecover"})
+    check("RECOVERY_SKIP" in host.text()[start:] and "NATIVE_IMPORT" not in host.text()[start:], "RequiresReview is sticky: a second recovery does nothing")
 
 
 def verify_final(host: Host, data: Path, base: Path, seed: dict, release_id: int, alternate_id: int, before: dict, incoming: dict,
@@ -437,7 +461,7 @@ def main() -> int:
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("CI") != "true":
         raise RuntimeError("Disposable CI runner required.")
     runner = Path(os.environ["RUNNER_TEMP"]).resolve()
-    if len(sys.argv) != 5 or sys.argv[4] not in ("three", "twelve", "three-crash"):
+    if len(sys.argv) != 5 or sys.argv[4] not in ("three", "twelve", "three-crash", "three-review"):
         raise ValueError(__doc__)
     bin_dir, plugin, seeder = (Path(a).resolve(strict=True) for a in sys.argv[1:4])
     base = Path(tempfile.mkdtemp(prefix=f"crescendarr-m17-{sys.argv[4]}-", dir=runner)).resolve()

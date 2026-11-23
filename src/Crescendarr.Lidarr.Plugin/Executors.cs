@@ -255,7 +255,12 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
             foreach (var opRoot in Directory.GetDirectories(ops).OrderBy(d => d, StringComparer.Ordinal))
             {
-                if (File.Exists(Path.Combine(opRoot, "outcome.json"))) continue;
+                if (File.Exists(Path.Combine(opRoot, "outcome.json")))
+                {
+                    // Sticky: a finished or RequiresReview operation is never resumed automatically.
+                    CrescendarrGuard.Emit(_logger, $"RECOVERY_SKIP op={Path.GetFileName(opRoot)} {File.ReadAllText(Path.Combine(opRoot, "outcome.json"))}");
+                    continue;
+                }
                 var operation = JsonDocument.Parse(File.ReadAllText(Path.Combine(opRoot, "operation.json"))).RootElement;
                 var staging = operation.GetProperty("staging").GetString();
                 var journalPath = Path.Combine(opRoot, "journal.json");
