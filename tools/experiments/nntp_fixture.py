@@ -71,7 +71,7 @@ def write_nzb(store: ArticleStore, files: list[Path], nzb: Path, job: str, segme
     for index, path in enumerate(files, start=1):
         data = path.read_bytes()
         parts = [data[i:i + segment_size] for i in range(0, len(data), segment_size)] or [b""]
-        subject = escape(f'{job} [{index}/{len(files)}] - "{path.name}" yEnc ({len(parts)})')
+        subject = escape(f'{job} [{index}/{len(files)}] - "{path.name}" yEnc ({len(parts)})', {"\"": "&quot;"})
         body.append(f'<file poster="crescendarr-ci@localhost" date="{int(time.time())}" subject="{subject}">')
         body.append("<groups><group>alt.binaries.crescendarr.test</group></groups><segments>")
         offset = 1
