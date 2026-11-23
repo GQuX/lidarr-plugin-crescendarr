@@ -603,7 +603,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 ? (manifest.AdditionBindingFor(trackId).DestinationPath, manifest.AdditionBindingFor(trackId).Incoming)
                 : (manifest.BindingFor(trackId).DestinationPath, manifest.BindingFor(trackId).Incoming);
             Disk.RequireConfined(context.Root, destination, "placed file");
-            if (!Disk.IsRegularFile(context.Root, destination) || Disk.Sha(destination) != incoming.Sha256 || _mediaFiles.GetFileWithPath(destination) != null ||
+            if (!Disk.IsRegularFile(context.Root, destination) || Disk.Sha(destination) != incoming.Sha256 || _mediaFiles.GetFileWithPath(new List<string> { destination }).Count > 0 ||
                 _tracks.GetTrack(trackId).TrackFileId != 0)
             {
                 CrescendarrGuard.Emit(_logger, $"REGISTER_REFUSED track={trackId} preconditions no longer hold");
@@ -877,8 +877,10 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var releaseTracks = _tracks.GetTracksByReleases(releases.Select(r => r.Id).ToList());
                 var bound = b.Tracks.Select(t => t.TrackId).Concat(b.Additions.Select(a => a.TrackId)).Concat(b.Kept.Select(k => k.TrackId)).ToHashSet();
                 var albumFiles = _mediaFiles.GetFilesByAlbum(b.AlbumId);
-                var pathRows = b.Tracks.SelectMany(t => new[] { t.OriginalPath, t.DestinationPath }).Concat(b.Additions.Select(a => a.DestinationPath)).Concat(b.Kept.Select(k => k.Path))
-                    .Distinct(StringComparer.Ordinal).Select(p => _mediaFiles.GetFileWithPath(p)).Where(f => f != null).ToList();
+                var paths = b.Tracks.SelectMany(t => new[] { t.OriginalPath, t.DestinationPath }).Concat(b.Additions.Select(a => a.DestinationPath)).Concat(b.Kept.Select(k => k.Path))
+                    .Distinct(StringComparer.Ordinal).ToList();
+                // The list overload returns zero or more rows; the single-path overload throws when no row exists.
+                var pathRows = _mediaFiles.GetFileWithPath(paths);
                 var ids = new HashSet<int>();
                 ids.UnionWith(b.Tracks.Select(t => t.OriginalTrackFileId));
                 ids.UnionWith(b.Kept.Select(k => k.TrackFileId));
