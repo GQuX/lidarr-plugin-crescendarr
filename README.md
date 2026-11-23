@@ -13,7 +13,7 @@ Crescendarr is a single additive Lidarr plugin designed to improve individual tr
 
 **There is no public release or supported production installer yet.** The next step is [GitHub URL installation (M26)](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/65). Until that is implemented and tested, **pasting this repository URL into Lidarr's Plugins page will not install Crescendarr**.
 
-The audit-only candidate is available as a GitHub Actions artifact for controlled testing, **not** as a published GitHub release. See [audit beta documentation](docs/audit-beta/README-AUDIT-BETA.md) and [release evidence](docs/release-gates/m25-audit-beta.md).
+The audit-only candidate is available as a GitHub Actions artifact for controlled testing, **not** as a published GitHub release. A GitHub-installer-compatible audit ZIP is being prepared, but it cannot be installed by URL until an approved pre-release is published. See [audit beta documentation](docs/audit-beta/README-AUDIT-BETA.md), [release evidence](docs/release-gates/m25-audit-beta.md) and [native installer contract](docs/release-gates/m26-native-installer.md).
 
 ## What would it do?
 
