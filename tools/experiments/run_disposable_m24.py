@@ -81,7 +81,13 @@ def keep_pristine(lane: Lane) -> None:
 
 
 def natives(host: Host, start: int = 0) -> int:
+    """Raw native-import log lines (each event is logged twice: console and NLog); use only for 'no further import'."""
     return host.text()[start:].count("NATIVE_IMPORT")
+
+
+def operations(host: Host) -> int:
+    """Distinct Crescendarr operations that reached an outcome."""
+    return len(set(re.findall(r"IMPORT_OUTCOME op=(\S+)", host.text())))
 
 
 def library(lane: Lane, label: str) -> tuple[dict, dict]:
@@ -148,13 +154,16 @@ def lane_library_change(lane: Lane) -> None:
         copy_bytes = make_copy(lane)
         wait_registry(lane, COPY, lambda e: e["state"] == "NoImprovement", "the byte-identical second download is recorded NoImprovement")
         check(registry(lane)[GOOD]["state"] == "Imported", "the first download is recorded Imported")
-        before_natives = natives(host)
+        before_natives, before_ops = natives(host), operations(host)
         delete_trackfile(host, lane, 3)
         mark = len(host.text())
         reg = wait_registry(lane, COPY, lambda e: e["state"] not in ("NoImprovement",),
                             "after another actor removed track 3, the NoImprovement download is RE-EVALUATED (not stale)")
         check(reg["state"] == "Imported", f"the re-evaluated download imported the missing track (state {reg['state']})")
-        check(natives(host) == before_natives + 1, "exactly one further native import (the re-evaluated download only, never the completed one)")
+        check(operations(host) == before_ops + 1, "exactly one further operation (the re-evaluated download only, never the completed one)")
+        check(host.text()[mark:].count("NATIVE_IMPORT kind=add track=3") >= 1 and "kind=upgrade" not in host.text()[mark:],
+              "that operation only added the missing track (no upgrade replayed)")
+        check(before_natives > 0, "")
         verify = lane.view("after-reevaluated-import")
         check(verify[3]["trackFileId"] > 0 and verify[3]["sha"] == copy_bytes[lane.audio(3).name], "track 3 restored from the second download's bytes")
         verify_consistent(lane, "after-reevaluated-import", [1], 2, [3])
@@ -286,7 +295,7 @@ def lane_ambiguous(lane: Lane) -> None:
         mark = len(host.text())
         wait_summary(host, r"imported=1", mark)
         verify_consistent(lane, "after-ambiguity-resolved", [1], 2, [3])
-        check(registry(lane)[GOOD]["state"] == "Imported" and natives(host) == 1, "imported exactly once after the ambiguity was resolved")
+        check(registry(lane)[GOOD]["state"] == "Imported" and operations(host) == 1, "imported exactly once after the ambiguity was resolved")
     finally:
         host.stop()
 
