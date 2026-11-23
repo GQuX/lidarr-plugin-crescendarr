@@ -52,6 +52,9 @@ internal static class Program
             ("M04 M18 post-move/pre-row crash (upgrade and add): operator approval without a scan; full recovery after the stock cascade", M18Specs.PostMoveCrashThenCascade),
             ("M05 M18 conflict, corrupt/missing backup, stale row, dangling link, protected bytes, fresh-row aliases: sticky review, zero mutations; unrelated sharing passes", M18Specs.Negatives),
             ("M06 M18 album lyrics are never re-registered while an album audio file is unregistered", M18Specs.ReattachOnlyWhenAudioLinked),
+            ("M07 M19 rescan of an unstarted upgrade: re-identified as evidence (binding immutable), album completes, lyrics restored", M18Specs.RescanRebaseOfUnstartedUpgrade),
+            ("M08 M19 ambiguous rescanned row: review, protective lyric-only salvage, resolution only when consistent", M18Specs.AmbiguousRebaseSalvage),
+            ("M09 M19 crash between row insert and track link: operator-approved link, then completion", M18Specs.PostRowPreLink),
         };
 
         // Optional local filter (comma-separated name prefixes); CI always runs everything.
@@ -257,8 +260,8 @@ internal static class Program
             ["unknown property"] = good.Replace("\"payload\":{", "\"payload\":{\"x\":1,", StringComparison.Ordinal),
             ["duplicate property"] = good.Replace("\"format\":", "\"format\":\"y\",\"format\":", StringComparison.Ordinal),
             ["numeric enum"] = good.Replace("\"status\":\"Active\"", "\"status\":\"1\"", StringComparison.Ordinal),
-            ["future version"] = good.Replace("\"version\":3", "\"version\":4", StringComparison.Ordinal),
-            ["previous version 2 (no M18 operation bindings)"] = good.Replace("\"version\":3", "\"version\":2", StringComparison.Ordinal),
+            ["future version"] = good.Replace("\"version\":4", "\"version\":5", StringComparison.Ordinal),
+            ["previous version 3 (no M19 rebase evidence)"] = good.Replace("\"version\":4", "\"version\":3", StringComparison.Ordinal),
             ["empty"] = "",
             ["oversize"] = new string(' ', JournalCodec.MaxDocumentChars + 1024),
             ["two in flight"] = Forge(m with { Progress = m.Progress.Select(p => p with { InFlight = p.TrackId == 2 ? JournalStep.DetachLyric : JournalStep.RelinkLyric }).ToImmutableArray() }),

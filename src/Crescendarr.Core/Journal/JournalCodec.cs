@@ -98,6 +98,7 @@ public static class JournalCodec
             if ((p.Phase >= TrackPhase.Upgraded) != (p.NewTrackFileId is not null)) return "new track-file ID inconsistent with phase";
             if ((p.Phase == TrackPhase.LyricRelinked) != (p.NewLyricFileId is not null)) return "new lyric ID inconsistent with phase";
             if (p.Phase > TrackPhase.BackupVerified && m.Progress.Any(o => o.Phase < TrackPhase.BackupVerified)) return "destructive phase before every backup was verified";
+            if (p.ObservedOriginalTrackFileId is { } observed && (observed <= 0 || observed == t.OriginalTrackFileId)) return "invalid rebase evidence";
         }
 
         var additions = m.Additions.IsDefault ? ImmutableArray<AdditionProgress>.Empty : m.Additions;
@@ -163,6 +164,7 @@ public static class JournalCodec
             w.WriteNumber("interruptedAttempts", p.InterruptedAttempts);
             NullableInt(w, "newTrackFileId", p.NewTrackFileId);
             NullableInt(w, "newLyricFileId", p.NewLyricFileId);
+            NullableInt(w, "observedOriginalTrackFileId", p.ObservedOriginalTrackFileId);
             w.WriteEndObject();
         }
 
@@ -310,7 +312,7 @@ public static class JournalCodec
         var reasons = Array(e, "reviewReasons").Select(r => r.ValueKind == JsonValueKind.String ? r.GetString()! : throw new FormatException("reason")).ToImmutableArray();
         var progress = Array(e, "progress").Select(p =>
         {
-            Exact(p, "trackId", "phase", "inFlight", "interruptedAttempts", "newTrackFileId", "newLyricFileId");
+            Exact(p, "trackId", "phase", "inFlight", "interruptedAttempts", "newTrackFileId", "newLyricFileId", "observedOriginalTrackFileId");
             var inFlight = NullableStr(p, "inFlight");
             return new TrackProgress(
                 Int(p, "trackId"),
@@ -318,7 +320,10 @@ public static class JournalCodec
                 inFlight is null ? null : ParseEnum<JournalStep>(inFlight),
                 Int(p, "interruptedAttempts"),
                 NullableInt(p, "newTrackFileId"),
-                NullableInt(p, "newLyricFileId"));
+                NullableInt(p, "newLyricFileId"))
+            {
+                ObservedOriginalTrackFileId = NullableInt(p, "observedOriginalTrackFileId"),
+            };
         }).ToImmutableArray();
 
         var additions = Array(e, "additions").Select(a =>

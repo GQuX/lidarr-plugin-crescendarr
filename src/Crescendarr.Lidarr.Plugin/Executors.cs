@@ -63,14 +63,16 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         public Album Album;
         public string ArtistMbid;
         public string Staging;
-        public string Approve;
         public OperationManifest Manifest;
+        public List<string> Salvaged = new List<string>();
+        public List<string> SalvageSkipped = new List<string>();
         public NextAction Proposal;
         public Func<bool> LoadStagedDecisions;
         public Dictionary<int, ImportDecision<LocalTrack>> StagedDecisionByTrack = new Dictionary<int, ImportDecision<LocalTrack>>();
     }
 
-    public sealed class CrescendarrImportExecutor : IExecute<CrescendarrImportCommand>, IExecute<CrescendarrRecoverCommand>
+    public sealed partial class CrescendarrImportExecutor : IExecute<CrescendarrImportCommand>, IExecute<CrescendarrRecoverCommand>,
+        IExecute<CrescendarrOperatorStatusCommand>, IExecute<CrescendarrProposeCommand>, IExecute<CrescendarrApproveCommand>
     {
         private const string Completed = "Completed";
         private const string RequiresReview = "RequiresReview";
@@ -311,7 +313,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     continue;
                 }
 
-                var context = new OperationContext { Root = root, OperationId = Path.GetFileName(opRoot), OperationRoot = opRoot, Approve = message.Approve };
+                var context = new OperationContext { Root = root, OperationId = Path.GetFileName(opRoot), OperationRoot = opRoot };
                 string outcome;
                 try
                 {
@@ -329,6 +331,15 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         }
 
         private string RecoverOne(OperationContext context)
+        {
+            var prepared = PrepareContext(context);
+            if (prepared != null) return prepared;
+            CrescendarrGuard.Emit(_logger, $"RECOVERY_START op={context.OperationId} status={context.Manifest.Status} generation={context.Manifest.Generation}");
+            return RunJournal(context);
+        }
+
+        /// <summary>Loads the journal and operation record into the context. Returns an outcome when it cannot.</summary>
+        private string PrepareContext(OperationContext context)
         {
             var opRoot = context.OperationRoot;
             var journalPath = Path.Combine(opRoot, "journal.json");
@@ -352,8 +363,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var downloadFolder = operation.GetProperty("downloadFolder").GetString();
             var candidates = operation.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
             context.LoadStagedDecisions = () => RefillAndDecide(context, downloadFolder, candidates);
-            CrescendarrGuard.Emit(_logger, $"RECOVERY_START op={context.OperationId} status={context.Manifest.Status} generation={context.Manifest.Generation}");
-            return RunJournal(context);
+            return null;
         }
 
         private string RequiresReviewWithoutJournal(OperationContext context, string why)
@@ -407,7 +417,6 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         {
             var manifest = context.Manifest;
             var nativeCount = 0;
-            var approvalUsed = false;
             string Review(string reason)
             {
                 if (manifest.Status == OperationStatus.Active)
@@ -441,14 +450,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     case Verdict.Completed:
                         return Completed;
                     case Verdict.OperatorApprovalRequired:
+                        // M19: host-row writes after an interruption run only through CrescendarrPropose/CrescendarrApprove.
                         context.Proposal = next;
-                        if (!approvalUsed && next?.Action == RecoveryAction.InsertFreshTrackFileForIncoming && next.TrackId is { } placedTrack &&
-                            string.Equals(context.Approve, $"{context.OperationId}:{placedTrack}:register-placed", StringComparison.Ordinal))
-                        {
-                            approvalUsed = true;
-                            if (RegisterPlaced(context, manifest, placedTrack)) continue;
-                        }
-
                         return OperatorApprovalRequired;
                     case Verdict.RequiresReview:
                         context.Proposal = next is { Mode: ActionMode.OperatorApproval } ? next : null;
@@ -484,7 +487,13 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     case RecoveryAction.DetachLyric:
                         Disk.RequireConfined(context.Root, binding.Lyric.Path, "bound lyric");
                         Declared(JournalStep.DetachLyric);
-                        _lyrics.Delete(binding.Lyric.LyricFileId);
+                        // After a recorded rebase the host rescan already removed the row; the step then only records that.
+                        if (_lyrics.GetFilesByArtist(context.Artist.Id).Any(l => l.Id == binding.Lyric.LyricFileId)) _lyrics.Delete(binding.Lyric.LyricFileId);
+                        break;
+                    case RecoveryAction.RecordOriginalRebase:
+                        manifest = JournalEngine.RecordOriginalRebase(manifest, trackId, next.NewTrackFileId.Value);
+                        Save(context.OperationRoot, manifest);
+                        CrescendarrGuard.Emit(_logger, $"REBASE_ORIGINAL track={trackId} boundOriginal={manifest.BindingFor(trackId).OriginalTrackFileId} observedCurrent={next.NewTrackFileId} (evidence only; binding unchanged)");
                         break;
                     case RecoveryAction.InvokeNativeUpgrade:
                     {
@@ -556,27 +565,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         Disk.CopyVerified(binding.BackupAudioPath, binding.OriginalPath, binding.Original.Sha256);
                         break;
                     case RecoveryAction.RestoreAlbumLyric:
-                    {
-                        var lyric = manifest.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
-                        Disk.RequireConfined(context.Root, lyric.Path, "album lyric");
-                        Disk.RequireConfined(context.Root, lyric.BackupPath, "album lyric backup");
-                        if (Disk.Occupied(lyric.Path)) break; // never overwrite; the reconciler re-evaluates what appeared
-                        Disk.CopyVerified(lyric.BackupPath, lyric.Path, lyric.Content.Sha256);
-                        CrescendarrGuard.Emit(_logger, $"RESTORE_ALBUM_LYRIC track={lyric.TrackId} \"{lyric.RelativePath}\" from verified backup sha={lyric.Content.Sha256[..12]}");
-                        break;
-                    }
-
                     case RecoveryAction.BindAlbumLyric:
-                    {
-                        var lyric = manifest.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
-                        var current = _tracks.GetTrack(lyric.TrackId).TrackFileId;
-                        if (current != next.NewTrackFileId ||
-                            _lyrics.GetFilesByArtist(context.Artist.Id).Any(l => string.Equals(l.RelativePath, lyric.RelativePath, StringComparison.OrdinalIgnoreCase)))
-                            break; // drift since the snapshot: reconcile again before any insert
-                        _lyrics.Upsert(NewLyricRow(context, manifest.Binding.AlbumId, current, lyric.RelativePath));
-                        CrescendarrGuard.Emit(_logger, $"BIND_ALBUM_LYRIC track={lyric.TrackId} \"{lyric.RelativePath}\" -> current trackFile={current}");
+                        ApplyLyricAction(context, manifest, next);
                         break;
-                    }
 
                     case RecoveryAction.CompleteOperation:
                         manifest = JournalEngine.Complete(manifest);
@@ -597,6 +588,61 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// Register exactly that file through the stock importer as an existing library file (no album rescan, so no
         /// cascade). Every precondition is re-read; any doubt leaves the operation awaiting approval.
         /// </summary>
+        /// <summary>
+        /// Lyric-only actions shared by the journal loop and the protective salvage. Every precondition is re-read right
+        /// before the write (no overwrite, exact hashes, the track's current row unchanged, no row at the path).
+        /// </summary>
+        private string ApplyLyricAction(OperationContext context, OperationManifest manifest, NextAction next)
+        {
+            var lyric = manifest.Binding.AlbumLyrics.Single(l => l.LyricFileId == next.AlbumLyricId);
+            Disk.RequireConfined(context.Root, lyric.Path, "album lyric");
+            Disk.RequireConfined(context.Root, lyric.BackupPath, "album lyric backup");
+            if (next.Action == RecoveryAction.RestoreAlbumLyric)
+            {
+                if (Disk.Occupied(lyric.Path)) return null; // never overwrite; the reconciler re-evaluates what appeared
+                Disk.CopyVerified(lyric.BackupPath, lyric.Path, lyric.Content.Sha256);
+                CrescendarrGuard.Emit(_logger, $"RESTORE_ALBUM_LYRIC track={lyric.TrackId} \"{lyric.RelativePath}\" from verified backup sha={lyric.Content.Sha256[..12]}");
+                Faults.Point(_logger, context.Root, "after-restore-lyric-" + lyric.TrackId);
+                return "restored " + lyric.RelativePath;
+            }
+
+            var current = _tracks.GetTrack(lyric.TrackId).TrackFileId;
+            if (current != next.NewTrackFileId || !Disk.IsRegularFile(context.Root, lyric.Path) || Disk.Sha(lyric.Path) != lyric.Content.Sha256 ||
+                _trackRepository.GetTracksByFileId(current).Count != 1 ||
+                _lyrics.GetFilesByArtist(context.Artist.Id).Any(l => string.Equals(l.RelativePath, lyric.RelativePath, StringComparison.OrdinalIgnoreCase)))
+                return null; // drift since the snapshot: reconcile again before any insert
+            _lyrics.Upsert(NewLyricRow(context, manifest.Binding.AlbumId, current, lyric.RelativePath));
+            CrescendarrGuard.Emit(_logger, $"BIND_ALBUM_LYRIC track={lyric.TrackId} \"{lyric.RelativePath}\" -> current trackFile={current}");
+            Faults.Point(_logger, context.Root, "after-bind-lyric-" + lyric.TrackId);
+            return "bound " + lyric.RelativePath + "->" + current;
+        }
+
+        /// <summary>
+        /// M19 protective salvage: lyric-only, bounded, each step from a fresh snapshot. It never touches audio, never
+        /// changes the journal status and never completes the operation.
+        /// </summary>
+        private void RunSalvage(OperationContext context)
+        {
+            if (context.Manifest == null || context.Artist == null) return;
+            var skipped = new List<string>();
+            var reasons = new List<string>();
+            for (var step = 0; step < 256; step++)
+            {
+                var plan = Reconciler.Salvage(context.Manifest, HostSnapshot(context.Manifest, context.Artist.Id), Observe(context.Root, context.Manifest));
+                skipped = plan.Skipped.ToList();
+                reasons = plan.Reasons.ToList();
+                var next = plan.Actions.FirstOrDefault();
+                if (!plan.Applicable || next == null) break;
+                var applied = ApplyLyricAction(context, context.Manifest, next);
+                if (applied == null) break;
+                context.Salvaged.Add(applied);
+            }
+
+            CrescendarrGuard.Emit(_logger, $"SALVAGE op={context.OperationId} restored=[{string.Join(",", context.Salvaged.Where(s => s.StartsWith("restored", StringComparison.Ordinal)))}] " +
+                $"bound=[{string.Join(",", context.Salvaged.Where(s => s.StartsWith("bound", StringComparison.Ordinal)))}] skipped=[{string.Join("; ", skipped)}] notApplicable=[{string.Join("; ", reasons)}]");
+            context.SalvageSkipped = skipped.Concat(reasons).ToList();
+        }
+
         private bool RegisterPlaced(OperationContext context, OperationManifest manifest, int trackId)
         {
             var (destination, incoming) = manifest.IsAddition(trackId)
@@ -620,8 +666,37 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             }
 
             var results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Auto);
-            CrescendarrGuard.Emit(_logger, $"REGISTER_PLACED track={trackId} path=\"{destination}\" results=[{Results(results)}] (operator approved)");
-            return true;
+            // Postconditions: exactly one Imported result, the track linked to a row at the destination, and the audio
+            // bytes unchanged (stock ExistingFile imports may rewrite tags when tag writing is enabled).
+            var linked = _tracks.GetTrack(trackId).TrackFileId;
+            var row = linked > 0 ? ExistingRows(new[] { linked }).FirstOrDefault() : null;
+            var ok = results.Count == 1 && results[0].Result == ImportResultType.Imported && row?.Path == destination &&
+                Disk.IsRegularFile(context.Root, destination) && Disk.Sha(destination) == incoming.Sha256;
+            CrescendarrGuard.Emit(_logger, $"REGISTER_PLACED track={trackId} ok={ok} path=\"{destination}\" row={row?.Id} results=[{Results(results)}] (operator approved)");
+            return ok;
+        }
+
+        /// <summary>Operator-approved: link the track to the row the stock importer inserted before the crash.</summary>
+        private bool LinkPlacedRow(OperationContext context, OperationManifest manifest, int trackId, int rowId)
+        {
+            var (destination, incoming) = manifest.IsAddition(trackId)
+                ? (manifest.AdditionBindingFor(trackId).DestinationPath, manifest.AdditionBindingFor(trackId).Incoming)
+                : (manifest.BindingFor(trackId).DestinationPath, manifest.BindingFor(trackId).Incoming);
+            Disk.RequireConfined(context.Root, destination, "placed file");
+            var row = ExistingRows(new[] { rowId }).FirstOrDefault();
+            var track = _tracks.GetTrack(trackId);
+            if (row == null || row.Path != destination || !Disk.IsRegularFile(context.Root, destination) || Disk.Sha(destination) != incoming.Sha256 ||
+                track.TrackFileId != 0 || _trackRepository.GetTracksByFileId(rowId).Count != 0)
+            {
+                CrescendarrGuard.Emit(_logger, $"LINK_REFUSED track={trackId} row={rowId} preconditions no longer hold");
+                return false;
+            }
+
+            track.TrackFileId = rowId;
+            _tracks.SetFileIds(new List<Track> { track });
+            var ok = _tracks.GetTrack(trackId).TrackFileId == rowId && _trackRepository.GetTracksByFileId(rowId).Count == 1;
+            CrescendarrGuard.Emit(_logger, $"LINK_PLACED_ROW track={trackId} row={rowId} ok={ok} (operator approved)");
+            return ok;
         }
 
         private string FailClosed(OperationContext context, Exception error)
@@ -662,6 +737,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             if (outcome == Completed && context.Staging != null && Directory.Exists(context.Staging) && Disk.IsUnder(context.Root, context.Staging) &&
                 !Disk.HasLinkInChain(context.Staging, context.Root))
                 Directory.Delete(context.Staging, recursive: true);
+            // M19: entering review triggers the protective lyric salvage (lyric-only, no overwrite, verified rows only).
+            if (outcome == RequiresReview) RunSalvage(context);
             if (outcome is RequiresReview or OperatorApprovalRequired) WriteSummary(context, outcome, detail);
 
             // OperatorApprovalRequired is not terminal (the album stays blocked; recovery re-evaluates). Everything else is sticky.
@@ -739,13 +816,16 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     proposal = context.Proposal == null ? null : new
                     {
                         action = context.Proposal.Action.ToString(), trackId = context.Proposal.TrackId, mode = context.Proposal.Mode.ToString(), reason = context.Proposal.Reason,
-                        approve = context.Proposal.Action == RecoveryAction.InsertFreshTrackFileForIncoming ? $"{context.OperationId}:{context.Proposal.TrackId}:register-placed" : null
+                        proposeAction = context.Proposal.Action == RecoveryAction.InsertFreshTrackFileForIncoming ? "register-placed" :
+                            context.Proposal.Action == RecoveryAction.LinkPlacedRow ? "link-placed-row" : null
                     },
                     operatorAction = outcome == OperatorApprovalRequired
-                        ? "Either dispatch CrescendarrRecover with the 'approve' token above (registers ONLY the placed file through the stock importer; no album rescan), " +
+                        ? "Propose and approve the listed action (CrescendarrPropose then CrescendarrApprove with the returned token; it registers or links ONLY the placed file, no album rescan), " +
                           "or run a stock RescanFolders for the artist and then CrescendarrRecover (the rescan re-imports the whole album and recycles registered lyrics; recovery restores them from the verified backups)."
-                        : "Inspect the files and rows below; compare them with the verified backups under the operation folder. Crescendarr will not modify this album again automatically.",
+                        : "Inspect the files and rows below. Fix any conflict, then CrescendarrPropose action=salvage-lyrics and/or action=resolve and approve with the returned token. Crescendarr will not modify this album's audio again automatically.",
                     journal = manifest == null ? null : new { manifest.Status, manifest.Generation },
+                    salvage = new { performed = context.Salvaged, notPerformed = context.SalvageSkipped },
+                    resolution = "Use CrescendarrPropose/CrescendarrApprove (actions: salvage-lyrics, resolve, register-placed, link-placed-row). Never delete this folder: it holds the only independent backups.",
                     monitoredRelease = b == null ? null : new
                     {
                         b.MonitoredReleaseId, b.MonitoredReleaseMbid,
@@ -800,7 +880,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var operation = Path.Combine(opRoot, "operation.json");
                 if (!File.Exists(operation) || JsonDocument.Parse(File.ReadAllText(operation)).RootElement.GetProperty("albumId").GetInt32() != albumId) continue;
                 var outcome = Path.Combine(opRoot, "outcome.json");
-                var finished = File.Exists(outcome) && JsonDocument.Parse(File.ReadAllText(outcome)).RootElement.GetProperty("outcome").GetString() is Completed or Abandoned;
+                // M19: an operator RESOLUTION releases the album block (it is not import completion or settlement).
+                var finished = (File.Exists(outcome) && JsonDocument.Parse(File.ReadAllText(outcome)).RootElement.GetProperty("outcome").GetString() is Completed or Abandoned) ||
+                    File.Exists(Path.Combine(opRoot, "resolution.json"));
                 if (!finished) result.Add(Path.GetFileName(opRoot));
             }
 

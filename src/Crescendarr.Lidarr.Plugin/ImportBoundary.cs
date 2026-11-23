@@ -96,6 +96,36 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         }
     }
 
+    /// <summary>
+    /// M19: the stock row-insert / track-link boundary. MediaFileService.AddMany inserts the rows and then publishes
+    /// TrackFileAddedEvent synchronously for each (MediaFileService.cs:59-65); only afterwards does ImportApprovedTracks
+    /// call SetFileIds (ImportApprovedTracks.cs:319-320). Observe-only, and only for imports Crescendarr started.
+    /// </summary>
+    public sealed class CrescendarrRowBoundary : NzbDrone.Core.Messaging.Events.IHandle<NzbDrone.Core.MediaFiles.Events.TrackFileAddedEvent>
+    {
+        private readonly Logger _logger;
+
+        public CrescendarrRowBoundary(Logger logger)
+        {
+            _logger = logger;
+        }
+
+        public void Handle(NzbDrone.Core.MediaFiles.Events.TrackFileAddedEvent message)
+        {
+            var scope = ImportScope.Current;
+            if (scope == null) return;
+            try
+            {
+                CrescendarrGuard.Emit(_logger, $"NATIVE_BOUNDARY post-row pre-link kind={scope.Kind} track={scope.TrackId} rowId={message.TrackFile.Id} path=\"{message.TrackFile.Path}\"");
+                Faults.Point(_logger, scope.Root, "post-row-" + scope.TrackId);
+            }
+            catch (Exception error)
+            {
+                CrescendarrGuard.Emit(_logger, "NATIVE_BOUNDARY_OBSERVATION_FAILED " + error.GetType().Name);
+            }
+        }
+    }
+
     /// <summary>Deterministic, test-owned fault points. Each pauses (so the harness can SIGKILL the daemon) only when armed.</summary>
     public static class Faults
     {

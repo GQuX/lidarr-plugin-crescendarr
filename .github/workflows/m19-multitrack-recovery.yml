@@ -1,0 +1,80 @@
+name: M19 real stock-daemon multi-track recovery and operator resolution (disposable)
+
+# M19 (#50) EXPERIMENTAL, TEST ONLY. Crash/data-integrity lanes of the ONE Crescendarr plugin. Official SHA-256-pinned Lidarr v3.1.6.5079 binary in a fresh ephemeral runner,
+# empty config, synthetic tagged audio, stock Usenet Blackhole client with CDH OFF. No production host,
+# media, NAS, SMB, downloader or secrets. Production write-enabled stays NO-GO.
+on:
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Lidarr.Plugin/**'
+      - 'src/Crescendarr.Core/**'
+      - 'src/Crescendarr.Lidarr.Preflight/**'
+      - 'tools/experiments/m17-seeder/**'
+      - 'tools/experiments/run_disposable_m17.py'
+      - 'tools/experiments/run_disposable_m18.py'
+      - 'tools/experiments/run_disposable_m19.py'
+      - '.github/workflows/m19-multitrack-recovery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  multitrack-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [twelve-postmove-recover, twelve-postmove-ambiguous, three-postrow, three-lyric-crash]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$archive" \
+            "https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz"
+          printf '%s  %s\n' 'fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc' "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/crescendarr-clean-host"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/crescendarr-clean-host"
+          bin="$(dirname "$(find "${RUNNER_TEMP}/crescendarr-clean-host" -type f -name Lidarr.Core.dll -print -quit)")"
+          test -f "$bin/Lidarr"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: Build the ONE experimental Crescendarr plugin and the separate test-harness seeder
+        shell: bash
+        run: |
+          set -euo pipefail
+          for project in src/Crescendarr.Lidarr.Plugin/Crescendarr.Lidarr.Plugin.csproj tools/experiments/m17-seeder/Crescendarr.M17FixtureSeeder.csproj; do
+            name="$(basename "$project" .csproj)"
+            dotnet build "$project" -c Release --nologo --output "${RUNNER_TEMP}/out-$name" \
+              -p:CrescendarrDisposableHostBuild=true -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}"
+          done
+      - name: Real daemon vertical slice (${{ matrix.scenario }})
+        shell: bash
+        run: |
+          python3 tools/experiments/run_disposable_m19.py "${{ steps.runtime.outputs.bin }}" \
+            "${RUNNER_TEMP}/out-Crescendarr.Lidarr.Plugin/Lidarr.Plugin.Crescendarr.dll" \
+            "${RUNNER_TEMP}/out-Crescendarr.M17FixtureSeeder/Lidarr.Plugin.CrescendarrFixtureSeeder.dll" \
+            "${{ matrix.scenario }}"
+      - name: Upload evidence (logs, DB copies, journals, plans)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m19-${{ matrix.scenario }}-evidence
+          path: |
+            ${{ runner.temp }}/m19-*-evidence.txt
+            ${{ runner.temp }}/crescendarr-m19-*/boot*.log
+            ${{ runner.temp }}/crescendarr-m19-*/db/**
+            ${{ runner.temp }}/crescendarr-m19-*/crescendarr/ops/**/*.json
+            ${{ runner.temp }}/crescendarr-m19-*/crescendarr/plans/**
+            ${{ runner.temp }}/crescendarr-m19-*/seed.json
+            ${{ runner.temp }}/crescendarr-m19-*/config/logs/**
+          retention-days: 7

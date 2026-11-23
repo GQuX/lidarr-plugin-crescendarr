@@ -166,7 +166,15 @@ public sealed record TrackProgress(
     JournalStep? InFlight,
     int InterruptedAttempts,
     int? NewTrackFileId,
-    int? NewLyricFileId);
+    int? NewLyricFileId)
+{
+    /// <summary>
+    /// M19: durable OBSERVATION evidence that a host rescan replaced the row of this not-yet-started replacement's
+    /// original file (same path, same bytes, same track, no other owner). The immutable binding keeps the original
+    /// ID; this records which current row now holds the same original. Null when never observed.
+    /// </summary>
+    public int? ObservedOriginalTrackFileId { get; init; }
+}
 
 /// <summary>One saved generation of the journal.</summary>
 public sealed record OperationManifest(
@@ -177,8 +185,8 @@ public sealed record OperationManifest(
     string BindingDigest,
     ImmutableArray<TrackProgress> Progress)
 {
-    /// <summary>Version 3 (M18) adds additions, kept tracks and album lyrics to the one operation journal.</summary>
-    public const int FormatVersion = 3;
+    /// <summary>Version 3 (M18) adds additions, kept tracks and album lyrics; version 4 (M19) adds rescan rebase evidence.</summary>
+    public const int FormatVersion = 4;
 
     /// <summary>M18: progress of every bound addition, in binding order.</summary>
     public ImmutableArray<AdditionProgress> Additions { get; init; } = ImmutableArray<AdditionProgress>.Empty;

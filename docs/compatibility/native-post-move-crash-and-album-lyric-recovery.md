@@ -98,7 +98,7 @@ ID 0 is excluded. Rows referenced by lyrics are loaded too, so stale rows are vi
   - Inspect `review.json`.
   - Missing lyrics can be copied back from `crescendarr/ops/<op>/album-lyrics/<id>.lrc`; the summary gives each file's hash and verification.
   - Rows must be fixed by a human.
-  - There is no resolve command yet. Removing the operation folder after manual resolution unblocks the album.
+  - **M19 replaces this:** use `CrescendarrPropose`/`CrescendarrApprove` (`salvage-lyrics`, `resolve`). Never delete the operation folder; it holds the only independent backups.
 
 ## Still unsafe or unproven
 

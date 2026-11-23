@@ -147,6 +147,27 @@ def recover(host: Host, approve: str | None = None) -> tuple[str, str]:
     return status(result), host.text()[start:]
 
 
+def propose(host: Host, op: str, action: str) -> tuple[bool, str | None, str]:
+    """M19 dry run: returns (allowed, token, PROPOSAL line). Nothing is changed."""
+    start = len(host.text())
+    host.command({"name": "CrescendarrPropose", "operationId": op, "action": action})
+    line = host.wait_log(rf"CRESCENDARR PROPOSAL op={op} action={re.escape(action)} [^\n]*", start=start).group(0)
+    note("PROPOSAL_LINE " + line[:1500])
+    token = re.search(r"token=(\w+)", line).group(1)
+    return "allowed=True" in line, (None if token == "none" else token), line
+
+
+def approve(host: Host, op: str, action: str, token: str) -> tuple[str, str]:
+    """M19 typed approval: returns ('applied' | 'rejected', log text since the command)."""
+    start = len(host.text())
+    host.command({"name": "CrescendarrApprove", "operationId": op, "action": action, "token": token})
+    text = host.text()[start:]
+    if f"APPROVAL_APPLIED op={op} action={action}" in text:
+        return "applied", text
+    check(f"APPROVAL_REJECTED op={op} action={action}" in text, f"approval of {action} reports applied or rejected")
+    return "rejected", text
+
+
 def foreign_rows(lane: Lane, state: dict) -> list:
     foreign = lane.seed.get("foreign")
     if not foreign:
@@ -318,9 +339,14 @@ def lane_noscan(lane: Lane) -> None:
         check("IMPORT_REFUSED" in host.text()[start:], f"a second import for the blocked album is refused (fresh disposition={field(fresh, 'disposition')})")
         check(lane.view("after-second-import") == frozen, "the refused second import changed nothing")
         op = lane.op_root().name
-        state, text = recover(host, approve=f"{op}:{lane.track_id(1)}:register-placed")
+        # M19: approval is a typed token bound to the operation, journal generation, action and FRESH snapshot.
+        check(approve(host, op, "register-placed", "0" * 32)[0] == "rejected", "a forged/stale approval token is rejected")
+        check(lane.view("after-forged-approval") == frozen, "the rejected approval changed nothing")
+        allowed, token, _ = propose(host, op, "register-placed")
+        check(allowed and token, "dry-run proposal for register-placed is allowed and yields a token")
+        result, text = approve(host, op, "register-placed", token)
         note("RECOVERY " + host.wait_log(r"IMPORT_OUTCOME[^\n]*outcome=Completed[^\n]*").group(0))
-        check(state == "completed", "approved targeted stock registration + recovery completed the operation")
+        check(result == "applied" and "REGISTER_PLACED" in text, "approved targeted stock registration + recovery completed the operation")
         final = verify_consistent(lane, "after-recovery", [1], 2, [3])
         check(final[2]["trackFileId"] == lane.track(2)["trackFileId"], "no cascade: the superior FLAC kept its ORIGINAL TrackFile row")
         check(not any(p.name.endswith(".lrc") for p in (lane.base / "recycle").rglob("*")), "no lyric was ever recycled on this path")
@@ -418,10 +444,21 @@ def lane_negatives(lane: Lane) -> None:
             check(state == "failed" and "outcome=RequiresReview" in text, f"{name}: sticky RequiresReview")
             check(re.search(reason, text, re.IGNORECASE) is not None, f"{name}: reason names the hazard ({reason})")
             after = lane.state(f"neg-after-{lane.boots}")
-            check(after["tracks"] == frozen["tracks"] and after["files"] == frozen["files"] and after["lyrics"] == frozen["lyrics"],
-                  f"{name}: zero TrackFile, link or lyric row changes")
-            check(files_state(lane.artist_path) == frozen_files and (lane.lyric(2).read_bytes() if lane.lyric(2).exists() else None) == frozen_lyric,
-                  f"{name}: zero library byte changes; nothing overwritten")
+            check(after["tracks"] == frozen["tracks"] and after["files"] == frozen["files"], f"{name}: zero TrackFile or link changes")
+            # M19: entering review runs the protective lyric-only salvage for OTHER, unambiguous lyrics. The hazard itself
+            # is never touched, nothing is overwritten, and every change must be one the salvage logged.
+            salvage = re.search(r"SALVAGE op=\S+ restored=\[([^\]]*)\] bound=\[([^\]]*)\]", text)
+            restored = salvage.group(1) if salvage else ""
+            bound = salvage.group(2) if salvage else ""
+            note(f"NEGATIVE_SALVAGE case={name!r} restored=[{restored}] bound=[{bound}]")
+            check(set(frozen["lyrics"]) <= set(after["lyrics"]), f"{name}: no lyric row removed")
+            check(all(row[2] in bound for row in set(after["lyrics"]) - set(frozen["lyrics"])), f"{name}: every new lyric row is a logged salvage bind")
+            changed = {k for k in set(files_state(lane.artist_path)) | set(frozen_files) if files_state(lane.artist_path).get(k) != frozen_files.get(k)}
+            check(all(k in restored and k not in frozen_files for k in changed), f"{name}: the only library byte changes are logged restores of MISSING lyrics (nothing overwritten)")
+            hazard_on_lyric2 = "dangling" not in reason
+            if hazard_on_lyric2:
+                check((lane.lyric(2).read_bytes() if lane.lyric(2).exists() else None) == frozen_lyric and lane.lyric(2).name not in restored + bound,
+                      f"{name}: the hazardous lyric was neither overwritten, restored nor registered")
             review_summary(lane, "RequiresReview")
             state, text = recover(host)
             check("RECOVERY_SKIP" in text, f"{name}: a second recovery does nothing (sticky)")

@@ -1,3 +1,13 @@
+# M19 update (issue #50, draft PR #53): multi-track crash recovery and operator resolution
+
+**Multi-track crash lane:**
+- **PROVEN (Completed)** when every row is unambiguous. A crash inside stock Import at track 6 of 12, plus a real stock rescan that changed every TrackFile ID, recovers to all 11 upgrades, the superior FLAC kept, and all 12 lyrics present with their original hashes and registered to the verified current rows.
+- **SAFE-REVIEW** when a rescanned row is ambiguous (a foreign alias). No further audio import runs, every unambiguous lyric is restored and registered, and an explicit typed operator workflow (propose, approve, salvage, resolve) releases the album without deleting journals or backups.
+
+The crash between the stock row insert and the track link is also exercised on the real daemon and needs a typed approval. Production write-enabled stays **NO-GO**. Details: [`docs/compatibility/native-multitrack-recovery-and-operator-resolution.md`](docs/compatibility/native-multitrack-recovery-and-operator-resolution.md).
+
+---
+
 # M18 update (issue #48, draft PR #49): the importer's crash and recovery paths
 
 **Verdict.** M17's golden path is still PROVEN. On the real stock daemon, M18 also makes these safe:

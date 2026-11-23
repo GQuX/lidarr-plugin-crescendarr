@@ -232,7 +232,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             Download("Crescendarr Synthetic Album [good]", ReleaseMbid, 2);
             Download("Crescendarr Synthetic Album [wrong edition]", AltReleaseMbid, 3);
 
-            var foreign = message.Scenario == "three" ? SeedForeign(rootFolder, profile, metadataProfile) : null;
+            var foreign = SeedForeign(rootFolder, profile, metadataProfile);
             var seed = new
             {
                 scenario = message.Scenario, artistId = artist.Id, artistPath = artist.Path, albumId = album.Id,

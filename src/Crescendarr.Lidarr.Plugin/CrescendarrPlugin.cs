@@ -41,12 +41,40 @@ namespace NzbDrone.Core.Plugins.Crescendarr
     /// <summary>Restart recovery: drives every Active journal through the M13 reconciler. Never trusts the Commands table.</summary>
     public sealed class CrescendarrRecoverCommand : Command
     {
-        /// <summary>
-        /// Optional explicit operator approval, "operationId:trackId:register-placed": register ONE file the native import
-        /// placed without a row (crash between move and row insert). Anything else is ignored.
-        /// </summary>
-        public string Approve { get; set; } = string.Empty;
 
+        public override bool RequiresDiskAccess => true;
+        public override bool SendUpdatesToClient => true;
+        public override bool UpdateScheduledTask => false;
+    }
+
+    /// <summary>M19 operator: read-only status of every operation (writes crescendarr/status.json and logs it).</summary>
+    public sealed class CrescendarrOperatorStatusCommand : Command
+    {
+        public override bool RequiresDiskAccess => true;
+        public override bool SendUpdatesToClient => true;
+        public override bool UpdateScheduledTask => false;
+    }
+
+    /// <summary>
+    /// M19 operator dry run: compute whether an action is allowed against a FRESH host snapshot and, if so, a token bound
+    /// to the operation ID, journal generation, action and snapshot digest. Changes nothing.
+    /// Actions: register-placed, link-placed-row, salvage-lyrics, resolve.
+    /// </summary>
+    public sealed class CrescendarrProposeCommand : Command
+    {
+        public string OperationId { get; set; } = string.Empty;
+        public string Action { get; set; } = string.Empty;
+        public override bool RequiresDiskAccess => true;
+        public override bool SendUpdatesToClient => true;
+        public override bool UpdateScheduledTask => false;
+    }
+
+    /// <summary>M19 operator approval: re-proposes from a fresh snapshot; applies only when the typed token still matches.</summary>
+    public sealed class CrescendarrApproveCommand : Command
+    {
+        public string OperationId { get; set; } = string.Empty;
+        public string Action { get; set; } = string.Empty;
+        public string Token { get; set; } = string.Empty;
         public override bool RequiresDiskAccess => true;
         public override bool SendUpdatesToClient => true;
         public override bool UpdateScheduledTask => false;
