@@ -239,7 +239,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         }
 
         /// <summary>Durable state of one operation as an operator sees it.</summary>
-        private static string OperationState(string opRoot)
+        internal static string OperationState(string opRoot)
         {
             if (File.Exists(Path.Combine(opRoot, "resolution.json"))) return "Resolved";
             var outcome = Path.Combine(opRoot, "outcome.json");

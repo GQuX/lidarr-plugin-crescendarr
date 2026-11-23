@@ -78,6 +78,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         private const string RequiresReview = "RequiresReview";
         private const string OperatorApprovalRequired = "OperatorApprovalRequired";
         private const string Abandoned = "Abandoned";
+        private const string Refused = "Refused";
 
         private readonly HostAdapter _adapter;
         private readonly IRootFolderService _rootFolders;
@@ -92,12 +93,15 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         private readonly IAlbumRepository _albumRepository;
         private readonly IMediaFileService _mediaFiles;
         private readonly IExtraFileService<LyricFile> _lyrics;
+        private readonly NzbDrone.Core.Notifications.INotificationFactory _notifications;
         private readonly Logger _logger;
 
         public CrescendarrImportExecutor(HostAdapter adapter, IRootFolderService rootFolders, IConfigService config, IImportApprovedTracks importer,
             IBuildFileNames fileNames, IArtistService artists, IAlbumService albums, IReleaseService releases, ITrackService tracks,
-            ITrackRepository trackRepository, IAlbumRepository albumRepository, IMediaFileService mediaFiles, IExtraFileService<LyricFile> lyrics, Logger logger)
+            ITrackRepository trackRepository, IAlbumRepository albumRepository, IMediaFileService mediaFiles, IExtraFileService<LyricFile> lyrics,
+            NzbDrone.Core.Notifications.INotificationFactory notifications, Logger logger)
         {
+            _notifications = notifications;
             _adapter = adapter;
             _rootFolders = rootFolders;
             _config = config;
@@ -118,30 +122,37 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
         public void Execute(CrescendarrImportCommand message)
         {
+            var outcome = RunImport(message.DownloadId, message.PlanId);
+            if (outcome != Completed && outcome != Refused) throw new CommandFailedException($"Crescendarr import ended {outcome}.");
+        }
+
+        /// <summary>
+        /// The ONE import path (manual command and M20 automatic cycle): re-observes, requires the exact approved plan ID,
+        /// and returns Completed, Refused, RequiresReview or OperatorApprovalRequired. Must run inside a disk-access command.
+        /// </summary>
+        private string RunImport(string downloadId, string planId)
+        {
             var root = CrescendarrGuard.RequireRoot();
             CrescendarrGuard.RequireHostConfined(root, _rootFolders, _config);
-            var match = _adapter.CompletedItems(root, out _).Where(i => i.Item.DownloadId == message.DownloadId).ToList();
+            var match = _adapter.CompletedItems(root, out _).Where(i => i.Item.DownloadId == downloadId).ToList();
             if (match.Count != 1) throw new CommandFailedException("Approved download is not exactly one completed client item.");
             var (item, clientId, watch) = match[0];
 
             var observed = _adapter.Observe(item, clientId, watch);
             if (observed.Blocked != null || observed.Plan == null)
             {
-                Refuse(message, "blocked: " + observed.Blocked, observed);
-                return;
+                return Refuse(downloadId, "blocked: " + observed.Blocked, observed);
             }
 
             var plan = observed.Plan;
-            if (plan.PlanId != message.PlanId)
+            if (plan.PlanId != planId)
             {
-                Refuse(message, $"plan no longer current (fresh plan {plan.PlanId} disposition={plan.Disposition})", observed);
-                return;
+                return Refuse(downloadId, $"plan no longer current (fresh plan {plan.PlanId} disposition={plan.Disposition})", observed);
             }
 
             if (plan.Disposition != PlanDisposition.Ready)
             {
-                Refuse(message, "plan disposition " + plan.Disposition, observed);
-                return;
+                return Refuse(downloadId, "plan disposition " + plan.Disposition, observed);
             }
 
             var operationId = OperationId(plan.PlanId);
@@ -153,22 +164,19 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var blocking = UnfinishedOperations(root, observed.Album.Id);
             if (blocking.Count > 0)
             {
-                Refuse(message, $"album has an unfinished operation [{string.Join(",", blocking)}]; it is not auto-resumed and blocks new imports until an operator resolves it", observed);
-                return;
+                return Refuse(downloadId, $"album has an unfinished operation [{string.Join(",", blocking)}]; it is not auto-resumed and blocks new imports until an operator resolves it", observed);
             }
 
             if (Disk.Occupied(opRoot) || Disk.Occupied(staging))
             {
-                Refuse(message, "operation already exists; only the recovery command may continue it", observed);
-                return;
+                return Refuse(downloadId, "operation already exists; only the recovery command may continue it", observed);
             }
 
             // M18 P1: canonical confinement and link checks (dangling links included) for EVERY path, before any write.
             var unsafePath = PathSafety(root, observed, opRoot, staging);
             if (unsafePath != null)
             {
-                Refuse(message, "path safety: " + unsafePath, observed);
-                return;
+                return Refuse(downloadId, "path safety: " + unsafePath, observed);
             }
 
             // 1. Operation-owned staged copies of every candidate (the completed download itself is never touched).
@@ -285,7 +293,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 outcome = FailClosed(context, error);
             }
 
-            if (!Finish(context, outcome)) throw new CommandFailedException($"Crescendarr operation {operationId} ended {outcome}.");
+            Finish(context, outcome);
+            return OperationState(opRoot);
         }
 
         // ------------------------------------------------------------------ recovery after restart
@@ -864,9 +873,10 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             }
         }
 
-        private void Refuse(CrescendarrImportCommand message, string why, Observation observed)
+        private string Refuse(string downloadId, string why, Observation observed)
         {
-            CrescendarrGuard.Emit(_logger, $"IMPORT_REFUSED download=\"{message.DownloadId}\" reason=\"{why}\" mutations=0 {_adapter.Describe(observed)}");
+            CrescendarrGuard.Emit(_logger, $"IMPORT_REFUSED download=\"{downloadId}\" reason=\"{why}\" mutations=0 {_adapter.Describe(observed)}");
+            return Refused;
         }
 
         /// <summary>Operation IDs for this album that are not finished (no outcome, or an outcome other than Completed/Abandoned).</summary>
