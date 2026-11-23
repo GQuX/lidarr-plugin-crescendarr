@@ -276,6 +276,29 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return best;
         }
 
+        /// <summary>M23: seconds to wait so a CIFS client's deferred close and attribute cache have settled (0 for other filesystems).</summary>
+        public static int CacheSettleSeconds(string path)
+        {
+            var identity = MountIdentity(path);
+            if (identity == null || !identity.StartsWith("cifs|", StringComparison.Ordinal)) return 0;
+            var mountpoint = identity.Split('|')[2];
+            foreach (var line in File.ReadLines("/proc/self/mountinfo"))
+            {
+                var fields = line.Split(' ');
+                var separator = Array.IndexOf(fields, "-");
+                if (fields.Length < 5 || separator < 0 || separator + 3 >= fields.Length || Unescape(fields[4]) != mountpoint) continue;
+                int Option(string name, int fallback)
+                {
+                    var pair = fields[separator + 3].Split(',').FirstOrDefault(o => o.StartsWith(name + "=", StringComparison.Ordinal));
+                    return pair != null && int.TryParse(pair[(name.Length + 1)..], out var value) ? value : fallback;
+                }
+
+                return Math.Min(30, Option("actimeo", 1) + Option("closetimeo", 1) + 2);
+            }
+
+            return 4;
+        }
+
         private static string Unescape(string value) => value.Replace("\\040", " ").Replace("\\011", "\t").Replace("\\012", "\n").Replace("\\134", "\\");
 
         /// <summary>M23: the folder accepts a durable write and a delete right now (a read-only or failing mount does not).</summary>

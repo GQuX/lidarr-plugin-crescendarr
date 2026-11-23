@@ -732,8 +732,64 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return ok;
         }
 
-        /// <summary>fsync every library file the operation relies on (destinations, protected originals, album lyrics). Null when all flushed.</summary>
-        private static string DurabilityBarrier(OperationContext context, OperationManifest manifest)
+        /// <summary>
+        /// fsync every library file the operation relies on (destinations, protected originals, album lyrics), then settle the
+        /// TrackFile.Modified of every file this operation placed. Null when all flushed and settled.
+        /// </summary>
+        private string DurabilityBarrier(OperationContext context, OperationManifest manifest)
+        {
+            var flushed = FlushAll(manifest);
+            return flushed ?? SettleModified(manifest);
+        }
+
+        /// <summary>
+        /// M23: on the real kernel CIFS mount the server moved the mtime of freshly imported files ~2.4 s AFTER the client
+        /// reported it (deferred close flushing buffered writes). Stock sets TrackFile.Modified at import and its rescan treats
+        /// a >1 s mtime difference as a changed file, so the next rescan re-imported the whole album and unregistered every
+        /// lyric. After flushing, wait out this mount's cache windows, record the SETTLED mtime in the rows this operation
+        /// created (Modified only, through the stock service), and require it to stay stable.
+        /// </summary>
+        private string SettleModified(OperationManifest manifest)
+        {
+            var b = manifest.Binding;
+            var placed = b.Tracks.Select(t => t.DestinationPath).Concat(b.Additions.Select(a => a.DestinationPath)).Distinct(StringComparer.Ordinal).ToList();
+            var wait = Disk.CacheSettleSeconds(b.ArtistRoot);
+            if (wait == 0) return null;
+            Thread.Sleep(TimeSpan.FromSeconds(wait));
+            var first = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            try
+            {
+                foreach (var path in placed)
+                {
+                    var info = new FileInfo(path);
+                    info.Refresh();
+                    first[path] = info.LastWriteTimeUtc;
+                    var rows = _mediaFiles.GetFileWithPath(new List<string> { path });
+                    if (rows.Count != 1) return $"expected exactly one TrackFile row at {path} before settling its mtime";
+                    if (Math.Abs((rows[0].Modified.ToUniversalTime() - info.LastWriteTimeUtc).TotalSeconds) <= 0.5) continue;
+                    CrescendarrGuard.Emit(_logger, $"MODIFIED_SETTLED \"{Path.GetFileName(path)}\" row={rows[0].Modified.ToUniversalTime():O} server={info.LastWriteTimeUtc:O}");
+                    rows[0].Modified = info.LastWriteTimeUtc;
+                    _mediaFiles.Update(rows[0]);
+                }
+
+                Thread.Sleep(TimeSpan.FromSeconds(wait));
+                foreach (var path in placed)
+                {
+                    var info = new FileInfo(path);
+                    info.Refresh();
+                    if (Math.Abs((info.LastWriteTimeUtc - first[path]).TotalSeconds) > 0.5)
+                        return $"mtime of {path} is still moving after the cache windows; a stock rescan could re-import the album";
+                }
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                return $"settling mtimes failed ({error.GetType().Name}: {error.Message})";
+            }
+
+            return null;
+        }
+
+        private static string FlushAll(OperationManifest manifest)
         {
             var b = manifest.Binding;
             var paths = b.Tracks.Select(t => t.DestinationPath).Concat(b.Additions.Select(a => a.DestinationPath)).Concat(b.Kept.Select(k => k.Path))
