@@ -1,0 +1,10 @@
+{
+  "source": "https://musicbrainz.org/ws/2/release/<id>?inc=recordings+artist-credits+release-groups+media&fmt=json",
+  "license": "MusicBrainz core data is CC0 1.0; metadata only, no audio",
+  "captured_utc": "2026-11-23T10:56:00.340227+00:00",
+  "purpose": "offline, immutable real-identity fixture for disposable CI (synthetic silent audio is tagged with these IDs)",
+  "files": {
+    "release-7925da59-b862-41fd-b0cd-4a9b345f036f.json": "b72a2031c517123ba5f17373156fc2aaec4b1b3a7158d761eb82e92d42579717",
+    "release-abd65bff-4396-47f4-b6e6-65b2f2cf8cde.json": "bea27bfea181223d7144fcb6b6fecf202c531bf5f5571ec215780d676dcd352c"
+  }
+}

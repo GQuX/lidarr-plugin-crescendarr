@@ -39,7 +39,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
         public override bool UpdateScheduledTask => false;
     }
 
-    public sealed class CrescendarrSeedFixtureExecutor : IExecute<CrescendarrSeedFixtureCommand>
+    public sealed partial class CrescendarrSeedFixtureExecutor : IExecute<CrescendarrSeedFixtureCommand>
     {
         public const string ArtistName = "Crescendarr Synthetic Artist";
         public const string AlbumTitle = "Crescendarr Synthetic Album";
@@ -95,6 +95,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             {
                 "three" => (3, new[] { 2 }, new[] { 3 }),
                 "twelve" => (12, new[] { 12 }, Array.Empty<int>()),
+                "realistic" or "realistic-repeated" => (0, Array.Empty<int>(), Array.Empty<int>()),
                 _ => throw new CommandFailedException("Unknown scenario.")
             };
 
@@ -105,6 +106,15 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             profile.UpgradeAllowed = true;
             profile = _qualityProfiles.Add(profile);
             var metadataProfile = _metadataProfiles.All().First();
+            if (total == 0)
+            {
+                var realistic = SeedRealistic(root, message.Scenario, rootFolder, profile, metadataProfile);
+                File.WriteAllText(Path.Combine(root, "seed.json"), JsonSerializer.Serialize(realistic, new JsonSerializerOptions { WriteIndented = true }));
+                var seeded = $"CRESCENDARR_SEEDED scenario={message.Scenario} (captured MusicBrainz fixture, synthetic audio)";
+                Console.WriteLine(seeded);
+                _logger.Info(seeded);
+                return;
+            }
 
             var metadata = _artistMetadata.Insert(new ArtistMetadata
             {

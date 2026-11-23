@@ -1,3 +1,18 @@
+# M21 update (issue #52, draft PR #55): realistic compatibility and pre-release gates
+
+**PROVEN on the real stock daemon:**
+- real MusicBrainz identities (a captured CC0 fixture): a 2-disc album with 27 tracks replaced or added, renaming ON with stock multi-disc paths, and the superior FLAC, every lyric and `cover.jpg` untouched;
+- **Lidarr's own SABnzbd integration** against a CI-only mock SAB API: waited while extracting, imported when completed, never sent a delete, kept the source;
+- a reproducible package with a disposable install/upgrade/uninstall cycle that changes no Lidarr setting.
+
+**FAIL-CLOSED:** the other edition, unidentifiable extra audio, and repeated recording MBIDs.
+
+**Defect found:** renaming ON crashed the plugin's destination prediction; fixed in `693d751`.
+
+**Still NO-GO for production:** a real SABnzbd server, SMB/NAS and power loss, Unicode paths, hardlinks and bind mounts, and a real-user opt-in. See [`docs/release-gates/m21-acceptance-matrix.md`](docs/release-gates/m21-acceptance-matrix.md).
+
+---
+
 # M20 update (issue #51, draft PR #54): unattended operation in the disposable stock host
 
 **A functioning disposable-host automated prototype**, proven on the real daemon in run [45160208006](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45160208006) (4/4 lanes). The harness only configures the plugin through Lidarr's Connect API; no Crescendarr command is pushed in the automatic lanes.

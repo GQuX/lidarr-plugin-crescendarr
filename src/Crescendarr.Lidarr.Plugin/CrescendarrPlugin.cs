@@ -94,6 +94,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         public const string RootVariable = "CRESCENDARR_M17_ROOT";
         public const string OptInValue = "DISPOSABLE_SYNTHETIC_ONLY";
         public const string ClientName = "Crescendarr Synthetic Blackhole";
+
+        /// <summary>M21: only stock download clients whose name starts with this prefix are ever observed.</summary>
+        public const string ClientNamePrefix = "Crescendarr Synthetic";
         private const string MarkerName = ".crescendarr-disposable-host";
         private const string MarkerText = "CRESCENDARR_DISPOSABLE_HOST_V1";
 
