@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- EXPERIMENTAL M17 vertical slice. DISPOSABLE CI HOSTS ONLY: no release, package or install instructions.
+       One assembly: the pure Crescendarr.Core planner/journal/reconciler and the read-only edition preflight
+       are compiled in from their single source of truth, not copied. -->
+  <PropertyGroup>
+    <AssemblyName>Lidarr.Plugin.Crescendarr</AssemblyName>
+    <RootNamespace>NzbDrone.Core.Plugins.Crescendarr</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CA1031;CA1062;CA1303;CA1305;CA1307;CA1309;CA1310;CA1822;CA1848;CA2254</NoWarn>
+  </PropertyGroup>
+  <Target Name="RejectUnconfiguredBuild" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(CrescendarrDisposableHostBuild)' != 'true'" Text="EXPERIMENTAL: pass -p:CrescendarrDisposableHostBuild=true on a disposable CI host. Never build or install for a real Lidarr." />
+    <Error Condition="'$(LidarrBinDir)' == ''" Text="Set -p:LidarrBinDir=/ABSOLUTE/PATH/TO/DISPOSABLE/LIDARR/BIN" />
+  </Target>
+  <ItemGroup>
+    <Compile Include="../Crescendarr.Core/**/*.cs" Exclude="../Crescendarr.Core/obj/**;../Crescendarr.Core/bin/**" LinkBase="Core" />
+    <Compile Include="../Crescendarr.Lidarr.Preflight/CrescendarrEditionPreflight.cs" Link="Preflight/CrescendarrEditionPreflight.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.IO.Abstractions"><HintPath>$(LidarrBinDir)/System.IO.Abstractions.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

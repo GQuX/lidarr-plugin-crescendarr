@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- TEST HARNESS ONLY: creates a synthetic artist/album/library in a DISPOSABLE stock Lidarr daemon.
+       It is loaded only during the harness setup boot and removed before Crescendarr runs. -->
+  <PropertyGroup>
+    <AssemblyName>Lidarr.Plugin.CrescendarrFixtureSeeder</AssemblyName>
+    <RootNamespace>NzbDrone.Core.Plugins.CrescendarrFixtureSeeder</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <Target Name="RejectUnconfiguredSeeder" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(CrescendarrDisposableHostBuild)' != 'true'" Text="TEST ONLY: pass -p:CrescendarrDisposableHostBuild=true on a disposable host." />
+    <Error Condition="'$(LidarrBinDir)' == ''" Text="Set -p:LidarrBinDir=/ABSOLUTE/PATH/TO/DISPOSABLE/LIDARR/BIN" />
+  </Target>
+  <ItemGroup>
+    <Reference Include="Lidarr.Core"><HintPath>$(LidarrBinDir)/Lidarr.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Lidarr.Common"><HintPath>$(LidarrBinDir)/Lidarr.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NLog"><HintPath>$(LidarrBinDir)/NLog.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.IO.Abstractions"><HintPath>$(LidarrBinDir)/System.IO.Abstractions.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
