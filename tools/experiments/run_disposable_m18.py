@@ -147,6 +147,27 @@ def recover(host: Host, approve: str | None = None) -> tuple[str, str]:
     return status(result), host.text()[start:]
 
 
+def propose(host: Host, op: str, action: str) -> tuple[bool, str | None, str]:
+    """M19 dry run: returns (allowed, token, PROPOSAL line). Nothing is changed."""
+    start = len(host.text())
+    host.command({"name": "CrescendarrPropose", "operationId": op, "action": action})
+    line = host.wait_log(rf"CRESCENDARR PROPOSAL op={op} action={re.escape(action)} [^\n]*", start=start).group(0)
+    note("PROPOSAL_LINE " + line[:1500])
+    token = re.search(r"token=(\w+)", line).group(1)
+    return "allowed=True" in line, (None if token == "none" else token), line
+
+
+def approve(host: Host, op: str, action: str, token: str) -> tuple[str, str]:
+    """M19 typed approval: returns ('applied' | 'rejected', log text since the command)."""
+    start = len(host.text())
+    host.command({"name": "CrescendarrApprove", "operationId": op, "action": action, "token": token})
+    text = host.text()[start:]
+    if f"APPROVAL_APPLIED op={op} action={action}" in text:
+        return "applied", text
+    check(f"APPROVAL_REJECTED op={op} action={action}" in text, f"approval of {action} reports applied or rejected")
+    return "rejected", text
+
+
 def foreign_rows(lane: Lane, state: dict) -> list:
     foreign = lane.seed.get("foreign")
     if not foreign:
@@ -318,9 +339,14 @@ def lane_noscan(lane: Lane) -> None:
         check("IMPORT_REFUSED" in host.text()[start:], f"a second import for the blocked album is refused (fresh disposition={field(fresh, 'disposition')})")
         check(lane.view("after-second-import") == frozen, "the refused second import changed nothing")
         op = lane.op_root().name
-        state, text = recover(host, approve=f"{op}:{lane.track_id(1)}:register-placed")
+        # M19: approval is a typed token bound to the operation, journal generation, action and FRESH snapshot.
+        check(approve(host, op, "register-placed", "0" * 32)[0] == "rejected", "a forged/stale approval token is rejected")
+        check(lane.view("after-forged-approval") == frozen, "the rejected approval changed nothing")
+        allowed, token, _ = propose(host, op, "register-placed")
+        check(allowed and token, "dry-run proposal for register-placed is allowed and yields a token")
+        result, text = approve(host, op, "register-placed", token)
         note("RECOVERY " + host.wait_log(r"IMPORT_OUTCOME[^\n]*outcome=Completed[^\n]*").group(0))
-        check(state == "completed", "approved targeted stock registration + recovery completed the operation")
+        check(result == "applied" and "REGISTER_PLACED" in text, "approved targeted stock registration + recovery completed the operation")
         final = verify_consistent(lane, "after-recovery", [1], 2, [3])
         check(final[2]["trackFileId"] == lane.track(2)["trackFileId"], "no cascade: the superior FLAC kept its ORIGINAL TrackFile row")
         check(not any(p.name.endswith(".lrc") for p in (lane.base / "recycle").rglob("*")), "no lyric was ever recycled on this path")
