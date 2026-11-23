@@ -17,9 +17,11 @@ run_disposable_m22.py <lidarr-bin> <plugin.dll> <seeder.dll> <sabnzbd-dir> <sab-
 
 The workflow is `.github/workflows/m22-real-sabnzbd.yml`.
 
-**Final head** `6812fe2`:
-- M22 [45180117144](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45180117144): **5/5**.
-- Same head: M17 4/4, M18 7/7, M19 4/4, M20 4/4, M21 4/4, journal lab, planner and inventory specs all green.
+**Final head** `05a18c7`. It includes the owner's stricter integrity commits `385af8a` and `61391e0`, which also reject truncated final frames and short trailing garbage.
+- M22 [45185118806](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45185118806): **5/5**.
+- Same head: M17 4/4, M18 7/7, M19 4/4, M20 4/4, M21 4/4, journal lab, planner and inventory specs. 35/35 jobs green.
+
+**One intermittent, unexplained failure.** On `61391e0` (run [45180367826](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45180367826)), `sab-real-restarts` failed its "SAB storage equals the folder used" check after a correct import that followed a SAB SIGKILL/restart. The check was then instrumented to log both paths. On the final head they are identical, and the lane passed on three of four heads. The cause is not established, and it is recorded here rather than claimed fixed.
 
 ## Evidence table
 
