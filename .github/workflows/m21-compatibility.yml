@@ -1,0 +1,82 @@
+name: M21 realistic compatibility and disposable packaging (disposable)
+
+# M21 (#52) EXPERIMENTAL, TEST ONLY. Official SHA-256-pinned Lidarr v3.1.6.5079 binary in a fresh ephemeral runner,
+# captured CC0 MusicBrainz metadata with synthetic audio, a CI-only mock SABnzbd API reached ONLY through Lidarr's own
+# SABnzbd client. No production host, media, NAS, SMB, real downloader, credentials or secrets. No release is published.
+on:
+  pull_request:
+    paths:
+      - 'src/Crescendarr.Lidarr.Plugin/**'
+      - 'src/Crescendarr.Core/**'
+      - 'tools/experiments/**'
+      - 'tools/package/**'
+      - '.github/workflows/m21-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [sab-client, realistic-rename, realistic-repeated, install-cycle]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/lidarr-3.1.6.5079-linux-core-x64.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$archive" \
+            "https://github.com/Lidarr/Lidarr/releases/download/v3.1.6.5079/Lidarr.master.3.1.6.5079.linux-core-x64.tar.gz"
+          printf '%s  %s\n' 'fed16c58f5de797be955e830a3a93994f020c1d8d60f5a6cb061d7647d45b8bc' "$archive" | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/crescendarr-clean-host"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/crescendarr-clean-host"
+          bin="$(dirname "$(find "${RUNNER_TEMP}/crescendarr-clean-host" -type f -name Lidarr.Core.dll -print -quit)")"
+          test -f "$bin/Lidarr"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: Reproducible package build (twice; byte-identical or fail)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/package/build_plugin.py "${{ steps.runtime.outputs.bin }}" "${RUNNER_TEMP}/pkg-a" | tee "${RUNNER_TEMP}/pkg-a.txt"
+          python3 tools/package/build_plugin.py "${{ steps.runtime.outputs.bin }}" "${RUNNER_TEMP}/pkg-b" | tee "${RUNNER_TEMP}/pkg-b.txt"
+          diff <(grep '^PACKAGE' "${RUNNER_TEMP}/pkg-a.txt") <(grep '^PACKAGE' "${RUNNER_TEMP}/pkg-b.txt")
+          cmp "${RUNNER_TEMP}/pkg-a/Lidarr.Plugin.Crescendarr.dll" "${RUNNER_TEMP}/pkg-b/Lidarr.Plugin.Crescendarr.dll"
+          grep '^PACKAGE' "${RUNNER_TEMP}/pkg-a.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the separate test-harness seeder
+        shell: bash
+        run: |
+          dotnet build tools/experiments/m17-seeder/Crescendarr.M17FixtureSeeder.csproj -c Release --nologo --output "${RUNNER_TEMP}/out-seeder" \
+            -p:CrescendarrDisposableHostBuild=true -p:LidarrBinDir="${{ steps.runtime.outputs.bin }}"
+      - name: Real daemon lane (${{ matrix.scenario }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          plugin="${RUNNER_TEMP}/pkg-a/Lidarr.Plugin.Crescendarr.dll"
+          if [ "${{ matrix.scenario }}" = "install-cycle" ]; then plugin="$(ls "${RUNNER_TEMP}"/pkg-a/*.zip)"; fi
+          python3 tools/experiments/run_disposable_m21.py "${{ steps.runtime.outputs.bin }}" "$plugin" \
+            "${RUNNER_TEMP}/out-seeder/Lidarr.Plugin.CrescendarrFixtureSeeder.dll" "${{ matrix.scenario }}"
+      - name: Upload evidence (logs, DB copies, journals, package)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m21-${{ matrix.scenario }}-evidence
+          path: |
+            ${{ runner.temp }}/m21-*-evidence.txt
+            ${{ runner.temp }}/pkg-a/**
+            ${{ runner.temp }}/crescendarr-m21-*/boot*.log
+            ${{ runner.temp }}/crescendarr-m21-*/db/**
+            ${{ runner.temp }}/crescendarr-m21-*/crescendarr/**/*.json
+            ${{ runner.temp }}/crescendarr-m21-*/seed.json
+          retention-days: 7
