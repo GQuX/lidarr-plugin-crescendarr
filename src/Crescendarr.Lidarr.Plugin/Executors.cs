@@ -535,6 +535,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                             results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
                         nativeCount++;
                         CrescendarrGuard.Emit(_logger, $"NATIVE_IMPORT kind=upgrade track={trackId} results=[{Results(results)}]");
+                        AlignModified(binding.DestinationPath);
                         Faults.Point(_logger, context.Root, "after-native-" + nativeCount);
                         break;
                     }
@@ -557,6 +558,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                             results = _importer.Import(new List<ImportDecision<LocalTrack>> { decision }, false, null, ImportMode.Move);
                         nativeCount++;
                         CrescendarrGuard.Emit(_logger, $"NATIVE_IMPORT kind=add track={trackId} results=[{Results(results)}]");
+                        AlignModified(add.DestinationPath);
                         Faults.Point(_logger, context.Root, "after-native-" + nativeCount);
                         break;
                     }
@@ -732,10 +734,42 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return ok;
         }
 
+        /// <summary>
+        /// M23: stock sets TrackFile.Modified from the SOURCE file's mtime (ImportApprovedTracks.cs:193) and its rescan treats a
+        /// file as changed when the disk mtime differs by more than 1 s (MediaFileService.FilterUnchangedFiles). A move across
+        /// filesystems (local staging to a CIFS library) is a copy and does not keep the mtime, so the next stock rescan
+        /// re-imports the whole album and recycles every registered lyric (observed on the real kernel CIFS mount). Align the
+        /// placed file's mtime to the row stock wrote (metadata only, on a file Crescendarr just placed). Null when aligned.
+        /// </summary>
+        private string AlignModified(string path)
+        {
+            try
+            {
+                var rows = _mediaFiles.GetFileWithPath(new List<string> { path });
+                if (rows.Count != 1 || !File.Exists(path)) return null;
+                var wanted = rows[0].Modified.ToUniversalTime();
+                var actual = File.GetLastWriteTimeUtc(path);
+                if (Math.Abs((actual - wanted).TotalSeconds) <= 1) return null;
+                File.SetLastWriteTimeUtc(path, wanted);
+                var after = File.GetLastWriteTimeUtc(path);
+                CrescendarrGuard.Emit(_logger, $"MTIME_ALIGNED \"{Path.GetFileName(path)}\" disk={actual:O} row={wanted:O} now={after:O}");
+                return Math.Abs((after - wanted).TotalSeconds) <= 1 ? null : $"mtime of {path} could not be aligned to its TrackFile row (a stock rescan would re-import the album)";
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                return $"mtime alignment failed ({error.GetType().Name}: {error.Message}) for {path}";
+            }
+        }
+
         /// <summary>fsync every library file the operation relies on (destinations, protected originals, album lyrics). Null when all flushed.</summary>
-        private static string DurabilityBarrier(OperationContext context, OperationManifest manifest)
+        private string DurabilityBarrier(OperationContext context, OperationManifest manifest)
         {
             var b = manifest.Binding;
+            foreach (var placed in b.Tracks.Select(t => t.DestinationPath).Concat(b.Additions.Select(a => a.DestinationPath)))
+            {
+                if (AlignModified(placed) is { } misaligned) return misaligned;
+            }
+
             var paths = b.Tracks.Select(t => t.DestinationPath).Concat(b.Additions.Select(a => a.DestinationPath)).Concat(b.Kept.Select(k => k.Path))
                 .Concat(b.AlbumLyrics.Select(l => l.Path)).Distinct(StringComparer.Ordinal);
             foreach (var path in paths)
