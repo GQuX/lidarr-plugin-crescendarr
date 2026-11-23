@@ -851,7 +851,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             try
             {
                 var manifest = context.Manifest;
-                string Sha(string path) => path != null && Disk.IsRegularFile(context.Root, path) ? Disk.Sha(path) : null;
+                // M23: never touch unavailable storage while describing it (a frozen SMB server would block the summary).
+                var storageDown = outcome == StorageUnavailable;
+                string Sha(string path) => storageDown || path == null ? null : Disk.IsRegularFile(context.Root, path) ? Disk.Sha(path) : null;
                 Track Fresh(int id)
                 {
                     try { return _tracks.GetTrack(id); }
