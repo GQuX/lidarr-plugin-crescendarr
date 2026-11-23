@@ -10,6 +10,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using NLog;
 using NzbDrone.Core.Extras.Files;
 using NzbDrone.Core.Extras.Lyrics;
@@ -109,6 +110,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             if (total == 0)
             {
                 var realistic = SeedRealistic(root, message.Scenario, rootFolder, profile, metadataProfile);
+                SettleModified();
                 File.WriteAllText(Path.Combine(root, "seed.json"), JsonSerializer.Serialize(realistic, new JsonSerializerOptions { WriteIndented = true }));
                 var seeded = $"CRESCENDARR_SEEDED scenario={message.Scenario} (captured MusicBrainz fixture, synthetic audio)";
                 Console.WriteLine(seeded);
@@ -244,6 +246,7 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
             Download("Crescendarr Synthetic Album [wrong edition]", AltReleaseMbid, 3);
 
             var foreign = SeedForeign(rootFolder, profile, metadataProfile);
+            SettleModified();
             var seed = new
             {
                 scenario = message.Scenario, artistId = artist.Id, artistPath = artist.Path, albumId = album.Id,
@@ -340,6 +343,24 @@ namespace NzbDrone.Core.Plugins.CrescendarrFixtureSeeder
         /// library the client's attribute cache can report an mtime right after a write that the server later moves by
         /// more than stock's 1 s "unchanged file" tolerance, which made a fixture row look stale to the next stock rescan.
         /// </summary>
+        /// <summary>
+        /// M23: on a CIFS library the kernel defers closes (closetimeo) and caches attributes (actimeo), so the mtime read
+        /// right after writing can move later by more than stock's 1 s tolerance. Wait out both windows, then record every
+        /// seeded file's settled mtime in its row through the stock service (pinning with setattr does not stick there).
+        /// </summary>
+        private void SettleModified()
+        {
+            Thread.Sleep(4000);
+            foreach (var file in _mediaFiles.GetFilesWithBasePath(_rootFolders.All().Single().Path))
+            {
+                var settled = new FileInfo(file.Path);
+                settled.Refresh();
+                if (Math.Abs((settled.LastWriteTimeUtc - file.Modified.ToUniversalTime()).TotalSeconds) <= 0.5) continue;
+                file.Modified = settled.LastWriteTimeUtc;
+                _mediaFiles.Update(file);
+            }
+        }
+
         private static DateTime StableMtime(FileInfo info)
         {
             var pinned = new DateTime(2025, 1, 1, 12, 0, 0, DateTimeKind.Utc).AddSeconds(info.Name.Length);
