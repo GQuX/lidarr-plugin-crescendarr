@@ -228,7 +228,9 @@ def stage_job(lane: Lane, store: ArticleStore, source: str, job: str, par2: bool
 def no_delete_and_intact(lane: Lane, sab: RealSab, nzo: str, folder: Path, incoming: dict[str, str]) -> None:
     state, slot = sab.job(nzo)
     check(state == "Completed" and slot, f"the job is still in real SABnzbd history as Completed (never deleted): {nzo}")
-    check(Path(slot["storage"]) == folder, "SABnzbd's reported storage is exactly the folder Lidarr/Crescendarr used")
+    reported = Path(os.path.normpath(slot["storage"])) if slot.get("storage") else None
+    note(f"SAB_STORAGE_COMPARE reported={redact(str(slot.get('storage')))!r} used={str(folder)!r}")
+    check(reported is not None and reported.resolve() == folder.resolve(), f"SABnzbd's reported storage is exactly the folder Lidarr/Crescendarr used ({reported} vs {folder})")
     check({p.name: sha(p) for p in folder.iterdir() if p.is_file()} == incoming, "the completed download is intact (same files, same bytes)")
     reg = registry(lane)
     entry = next(e for e in reg.values() if Path(e["folder"]) == folder)
