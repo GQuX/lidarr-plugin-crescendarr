@@ -77,6 +77,7 @@ jobs:
         run: |
           for m in $(findmnt -rn -t cifs -o TARGET); do sudo umount -l "$m" || true; done
           sudo pkill -9 smbd || true
+          sudo chmod -R a+rX "${RUNNER_TEMP}"/crescendarr-m23-samba-* 2>/dev/null || true
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4

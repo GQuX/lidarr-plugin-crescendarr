@@ -49,7 +49,7 @@ def fstype(path: Path) -> str:
 
 def storage_layout(lane: Lane) -> None:
     layout = {name: fstype(path) for name, path in {
-        "library (artist root)": lane.artist_path, "download source": lane.watch, "staging + journal + lyric backups": lane.base / "crescendarr",
+        "library (artist root)": lane.artist_path, "download source": lane.watch, "staging + journal + lyric backups": lane.base,
         "recycle bin": lane.base / "recycle", "lidarr database": lane.data}.items()}
     note(f"STORAGE_LAYOUT {json.dumps(layout)}")
     check(layout["library (artist root)"] == "cifs", "the library is on a REAL kernel CIFS mount")
@@ -67,7 +67,12 @@ def lane_baseline(lane: Lane, upgrades: list[int], superior: int, added: list[in
         recycled = [p.name for p in (lane.base / "recycle").rglob("*") if p.is_file()]
         check(not any(x.endswith(".lrc") for x in recycled), "no lyric was recycled")
         scan = host.command({"name": "RescanFolders"})
-        check(status(scan) == "completed" and lane.view("after-rescan") == final, "stock rescan over CIFS changed nothing")
+        rescanned = lane.view("after-rescan")
+        print_view("AFTER_RESCAN", rescanned)
+        for n in sorted(final):
+            if rescanned.get(n) != final[n]:
+                note(f"RESCAN_CHANGED track={n} before={final[n]} after={rescanned.get(n)}")
+        check(status(scan) == "completed" and rescanned == final, "stock rescan over CIFS changed nothing")
         host = replay_and_restart(lane, host, final, "after-replay")
     finally:
         host.stop()
@@ -225,7 +230,7 @@ def main() -> int:
         for log in sorted(base.glob("boot*.log"), key=lambda p: int(re.sub(r"\D", "", p.name) or 0)):
             print(f"=== {log.name} (Crescendarr and error lines) ===")
             for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("CRESCENDARR") or any(k in line for k in ("Exception", "[Error]", "[Fatal]", "RecycleBin")):
+                if line.startswith("CRESCENDARR") or any(k in line for k in ("Exception", "[Error]", "[Fatal]", "RecycleBin", "DiskScanService", "ImportApprovedTracks", "MediaFileTableCleanup", "TrackFileMovingService")):
                     print(line[:2000])
         (runner / f"m23-{name}-evidence.txt").write_text("\n".join(m17.EVIDENCE) + "\n", encoding="utf-8")
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
