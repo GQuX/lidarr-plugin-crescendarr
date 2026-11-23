@@ -302,8 +302,10 @@ def lane_restarts(lane: Lane, sab: RealSab, store: ArticleStore) -> None:
         before = lane.view("before")
         nzo = sab.add(nzb)
         sab.wait(nzo, ("Downloading", "Fetching"), deadline=120)
-        while len(store.served) < 2:
+        limit = time.monotonic() + 120
+        while len(store.served) < 2 and time.monotonic() < limit:
             time.sleep(0.2)
+        check(len(store.served) >= 2, "real SABnzbd was fetching articles when it was killed")
         sab.stop(kill=True)
         check(sab.process.poll() is not None, "real SABnzbd SIGKILLed mid-download")
         mark = len(host.text())

@@ -61,6 +61,10 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/sab"
           tar -xzf "$archive" -C "${RUNNER_TEMP}/sab"
           dir="${RUNNER_TEMP}/sab/SABnzbd-${SABNZBD_VERSION}"
+          # SABnzbd refuses to download without par2 and unrar ("Essential modules are missing"). Ubuntu 24.04 archive packages.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq par2 unrar >/dev/null
+          { echo "par2: $(par2 --version 2>&1 | head -1)"; echo "unrar: $(unrar 2>&1 | sed -n 2p)"; dpkg-query -W par2 unrar; } | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -m venv "${RUNNER_TEMP}/sab-venv"
           "${RUNNER_TEMP}/sab-venv/bin/pip" install --quiet --disable-pip-version-check -r "$dir/requirements.txt"
           "${RUNNER_TEMP}/sab-venv/bin/python" -c "import sabctools, sys; print('sabctools', sabctools.__version__, 'python', sys.version.split()[0])" | tee -a "$GITHUB_STEP_SUMMARY"
