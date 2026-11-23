@@ -43,8 +43,11 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
     public sealed class CrescendarrPlugin : Plugin
     {
-        public override string Name => "Crescendarr audit-only beta (read-only preview)";
-        public override string Owner => "Crescendarr project";
+        // Lidarr's InstallPluginService matches IPlugin.Owner and IPlugin.Name to the GitHub repository
+        // owner/name when tracking installed plugins and uninstalling them. They must match the URL exactly.
+        // The friendly label lives on the Crescendarr Connect provider, not on this identity.
+        public override string Name => "lidarr-plugin-crescendarr";
+        public override string Owner => "GQuX";
         public override string GithubUrl => "https://github.com/GQuX/lidarr-plugin-crescendarr";
     }
 

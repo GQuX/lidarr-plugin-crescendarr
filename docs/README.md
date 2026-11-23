@@ -10,7 +10,7 @@ This is the guide to the useful documents. The repository also contains detailed
 | Evaluate the audit-only beta | [Audit beta guide](audit-beta/README-AUDIT-BETA.md) |
 | Verify the read-only guarantees, test coverage and limitations | [M25 acceptance matrix](release-gates/m25-audit-beta.md) |
 | Understand what blocks real-library writes | [M23 CIFS/SMB durability evidence](release-gates/m23-cifs-durability.md) and [M22 real SABnzbd evidence](release-gates/m22-real-sabnzbd-evidence.md) |
-| Follow GitHub URL installation work | [M26 installer issue](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/65) |
+| Follow GitHub URL installation work | [M26 installer contract and release gate](release-gates/m26-native-installer.md) · [issue #65](https://github.com/GQuX/lidarr-plugin-crescendarr/issues/65) |
 
 ## Engineering references
 
