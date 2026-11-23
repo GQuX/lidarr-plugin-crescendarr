@@ -37,7 +37,7 @@ class CifsShare:
     def configure(self) -> None:
         self.export.mkdir(parents=True, exist_ok=True)
         os.chmod(self.export, 0o777)
-        for d in ("private", "lock", "state", "cache", "pid", "log"):
+        for d in ("private", "lock", "state", "cache", "pid", "log", "ncalrpc", "binddns"):
             (self.state / d).mkdir(parents=True, exist_ok=True)
         s = self.state
         self.conf.write_text(f"""[global]
@@ -59,6 +59,9 @@ class CifsShare:
    pid directory = {s / 'pid'}
    log file = {s / 'log'}/smbd.log
    log level = 1
+   ncalrpc dir = {s / 'ncalrpc'}
+   binddns dir = {s / 'binddns'}
+   server services = smb
    strict sync = yes
    sync always = no
 [crescendarr]
@@ -82,7 +85,10 @@ class CifsShare:
             if subprocess.run(["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/445"], capture_output=True).returncode == 0:
                 return
             time.sleep(0.3)
-        raise RuntimeError("smbd did not listen on 127.0.0.1:445")
+        output = (self.state / "smbd.stdout").read_text(errors="replace")[-4000:]
+        logs = "".join(p.read_text(errors="replace")[-3000:] for p in (self.state / "log").glob("*"))
+        raise RuntimeError(f"smbd did not listen on 127.0.0.1:445 (exit={self.process.poll()})"
+                           f"\n--- smbd output ---\n{output}\n--- smbd log ---\n{logs}")
 
     def server_pids(self) -> list[int]:
         out = subprocess.run(["pgrep", "-f", f"smbd.*{self.conf}"], capture_output=True, text=True).stdout.split()
