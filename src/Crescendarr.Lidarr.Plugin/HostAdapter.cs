@@ -249,8 +249,9 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             o.Album = _albums.GetAlbum(albums[0]);
             o.Artist = _artists.GetArtist(o.Decisions[0].Item.Artist.Id);
             if (o.Album.ArtistMetadataId != o.Artist.ArtistMetadataId) { o.Blocked = "album and artist identities disagree"; return o; }
-            o.CandidateRelease = _releases.GetReleasesByAlbum(o.Album.Id).Single(r => r.Id == releases[0]);
-            var monitored = _releases.GetReleasesByAlbum(o.Album.Id).Where(r => r.Monitored).ToList();
+            var albumReleases = _releases.GetReleasesByAlbum(o.Album.Id);
+            o.CandidateRelease = albumReleases.Single(r => r.Id == releases[0]);
+            var monitored = albumReleases.Where(r => r.Monitored).ToList();
             if (monitored.Count != 1) { o.Blocked = $"album has {monitored.Count} monitored releases"; return o; }
             o.MonitoredRelease = monitored[0];
             o.AlbumTracks = _tracks.GetTracksByRelease(o.MonitoredRelease.Id);
@@ -294,13 +295,21 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
             var existing = ImmutableArray.CreateBuilder<ExistingFile>();
             var state = new StringBuilder();
-            foreach (var track in o.AlbumTracks.Where(t => t.TrackFileId > 0).OrderBy(t => t.Id))
+
+            // M15's global ownership proof is still mandatory. Fetch ALL sharers of ALL album TrackFile IDs in one
+            // host query, then group locally instead of querying the database once per track (up to 28+ round trips).
+            // Never substitute GetFilesByAlbum here: it misses owners in other albums.
+            var ownedTracks = o.AlbumTracks.Where(t => t.TrackFileId > 0).OrderBy(t => t.Id).ToList();
+            var fileIds = ownedTracks.Select(t => t.TrackFileId).Distinct().ToList();
+            var sharersByFile = (fileIds.Count == 0 ? new List<Track>() : _trackRepository.GetTracksByFileId(fileIds))
+                .GroupBy(t => t.TrackFileId).ToDictionary(g => g.Key, g => g.ToList());
+            foreach (var track in ownedTracks)
             {
                 o.TrackFiles.TryGetValue(track.TrackFileId, out var file);
                 file ??= _mediaFiles.Get(track.TrackFileId);
 
-                // GLOBAL sharer enumeration (M15): every track in ANY album that links this file.
-                var sharers = _trackRepository.GetTracksByFileId(track.TrackFileId);
+                // Includes every global sharer, even when the owner belongs to a different album.
+                var sharers = sharersByFile.TryGetValue(track.TrackFileId, out var linked) ? linked : new List<Track>();
                 var present = file != null && File.Exists(file.Path) && new FileInfo(file.Path).Length == file.Size &&
                     !Disk.HasLinkInChain(file.Path, o.Artist.Path);
                 var lyricRows = o.AlbumLyrics.Where(l => l.TrackFileId == track.TrackFileId).ToList();
