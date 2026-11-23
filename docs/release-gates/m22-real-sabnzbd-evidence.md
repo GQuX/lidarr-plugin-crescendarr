@@ -21,7 +21,9 @@ The workflow is `.github/workflows/m22-real-sabnzbd.yml`.
 - M22 [45185118806](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45185118806): **5/5**.
 - Same head: M17 4/4, M18 7/7, M19 4/4, M20 4/4, M21 4/4, journal lab, planner and inventory specs. 35/35 jobs green.
 
-**One intermittent, unexplained failure.** On `61391e0` (run [45180367826](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45180367826)), `sab-real-restarts` failed its "SAB storage equals the folder used" check after a correct import that followed a SAB SIGKILL/restart. The check was then instrumented to log both paths. On the final head they are identical, and the lane passed on three of four heads. The cause is not established, and it is recorded here rather than claimed fixed.
+**One intermittent, unexplained failure.** On `61391e0` (run [45180367826](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45180367826)), `sab-real-restarts` failed its "SAB storage equals the folder used" check after a correct import that followed a SAB SIGKILL/restart. The check was then instrumented to log both paths. On the final head they are identical, and the lane passed on three of four heads. The cause was not established at the time.
+
+**M27 update: root cause found (a harness race, not a product defect).** Run [45261466914](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45261466914) logged `used='.'`: real SABnzbd briefly publishes the history slot as `Completed` before it fills in `storage`, and `RealSab.wait` returned that slot, so the lane compared against `Path('') == '.'`. SABnzbd's own later answer, the "reported" side of the comparison, was correct. The fix makes `RealSab.wait` wait for a completed slot that names its storage folder. The comparison itself is unchanged and still exact.
 
 ## Evidence table
 
