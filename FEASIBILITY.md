@@ -1,3 +1,15 @@
+# M20 update (issue #51, draft PR #54): unattended operation in the disposable stock host
+
+**A functioning disposable-host automated prototype**, proven on the real daemon in run [45160208006](https://github.com/GQuX/lidarr-plugin-crescendarr/actions/runs/45160208006) (4/4 lanes). The harness only configures the plugin through Lidarr's Connect API; no Crescendarr command is pushed in the automatic lanes.
+- **Guarded auto:** the plugin's own stock-queued cycles imported the Ready download and recorded the wrong-edition one for review. Later cycles and a restart re-imported nothing (`alreadyHandled=2`). Sources were retained, the stock queue showed 0 records, `Disabled` stopped cycles, and the plugin is inert without opt-in.
+- **Audit only (default):** zero library writes, plus a native System > Status warning. Explicit approval (the registry plan ID) imported the download, and the next cycle recorded it as handled.
+- **Crash/restart:** SIGKILL during an automatic import. The startup cycle ran **recovery first** and completed the operation.
+- **Busy album:** a review blocked the album; a native health **error** names the operation, later cycles never imported into it, and operator status lists it.
+
+Configuration lives in stock Settings > Connect (no UI injection needed); see [`docs/operator-guide.md`](docs/operator-guide.md). Production write-enabled stays **NO-GO**.
+
+---
+
 # M19 update (issue #50, draft PR #53): multi-track crash recovery and operator resolution
 
 **Multi-track crash lane:**
