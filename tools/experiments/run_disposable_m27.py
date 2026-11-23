@@ -159,9 +159,12 @@ def attribute(lane: Lane, host: Host, before: Snapshot, label: str, stock_may_im
     only_state = [str(p.relative_to(lane.data)) for p in lane.data.rglob("*") if "crescendarr" in str(p.relative_to(lane.data)).lower()
                   and not str(p.relative_to(lane.data)).startswith(("crescendarr-audit", "plugins"))]
     check(not only_state, f"{label}: Crescendarr files only in crescendarr-audit/ and its plugin folder ({only_state[:5]})")
-    moved = sorted(k for k in set(before.downloads) | set(after.downloads) if before.downloads.get(k) != after.downloads.get(k)
+    # Downloads that EXISTED before this step must be untouched unless stock consumed them; new SABnzbd job folders
+    # created during the step are the step's own input.
+    moved = sorted(k for k in before.downloads if before.downloads.get(k) != after.downloads.get(k)
                    and not k.startswith(harness_downloads or ("<none>",)))
-    note(f"DOWNLOAD_SOURCES {label} changed={moved[:8]}")
+    added = sorted(k for k in after.downloads if k not in before.downloads)
+    note(f"DOWNLOAD_SOURCES {label} changedOrRemoved={moved[:8]} newDownloads={len(added)}")
     if moved:
         # Only stock may consume a completed download (CDH ON imports and, by its client default, removes it).
         check(stock_may_import and writes, f"{label}: download sources changed only where stock imported them ({moved[:5]})")
