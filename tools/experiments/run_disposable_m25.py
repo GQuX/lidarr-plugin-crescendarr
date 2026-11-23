@@ -178,6 +178,7 @@ def actions(entry: dict) -> dict[int, str]:
 
 def inject(host: Host, lane: Lane) -> None:
     """Writer commands through the stock API: none may exist or run in this build."""
+    before = {c[0] for c in lane.state("before-injection")["commands"]}
     for name in WRITER_COMMANDS:
         body = {"name": name, "downloadId": "x", "planId": "0" * 64, "operationId": "00000000-0000-4000-8000-000000000000", "action": "resolve", "token": "x"}
         try:
@@ -187,8 +188,9 @@ def inject(host: Host, lane: Lane) -> None:
             outcome = "refused: " + str(refused)[:160]
         note(f"INJECTED {name} -> {outcome}")
         check(outcome != "completed", f"injected writer command {name} did not run")
-    names = {c[1] for c in lane.state("after-injection")["commands"]}
-    check(not names & set(WRITER_COMMANDS), f"no writer command was ever recorded by stock ({sorted(names & set(WRITER_COMMANDS))})")
+    # (CrescendarrSeedFixture legitimately ran in the separate SETUP boot with the test seeder; only new rows count.)
+    new = [c for c in lane.state("after-injection")["commands"] if c[0] not in before]
+    check(not [c for c in new if c[1] in WRITER_COMMANDS], f"no injected writer command was accepted by stock ({[c[1] for c in new]})")
 
 
 def set_connect_settings_in_db(lane: Lane, mutate) -> None:
