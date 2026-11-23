@@ -412,7 +412,7 @@ def lane_unverified_missing(lane: Lane, sab: RealSab, store: ArticleStore) -> No
         wait_cycles(host, mark, 2)
         text = host.text()[mark:]
         check("NATIVE_IMPORT" not in text, "the damaged 'Completed' download was NOT imported")
-        check(re.search(r"failed the integrity check", text) is not None, "the refusal names the integrity failure")
+        check(re.search(r"failed the integrity check", host.text()) is not None, "the refusal names the integrity failure")
         check(lane.view("after") == before and m17.files_state(lane.artist_path) == before_files, "zero row, link, lyric or byte change")
         reg = registry(lane)
         check(reg and next(iter(reg.values()))["state"] == "Blocked", "the registry records the download as Blocked (never handled successfully)")

@@ -84,7 +84,7 @@ def registry(lane: Lane) -> dict[str, dict]:
     for p in folder.glob("*.json") if folder.exists() else []:
         entry = json.loads(p.read_text())
         entries[Path(entry["folder"]).name] = entry
-    note(f"REGISTRY {json.dumps({k: {x: v[x] for x in ('state', 'pluginHandled', 'lidarrImported', 'downloaderRemoved', 'sourceRetained', 'planId')} for k, v in entries.items()})}")
+    note(f"REGISTRY {json.dumps({k: {x: v.get(x) for x in ('state', 'pluginHandled', 'lidarrImported', 'downloaderRemoved', 'sourceRetained', 'planId', 'reason', 'blocked')} for k, v in entries.items()})}")
     return entries
 
 

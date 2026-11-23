@@ -380,7 +380,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         settlement = "Plugin-local record only. Crescendarr never calls the client's RemoveItem and never marks the stock queue imported (CDH OFF).",
                         firstSeen = previous?.TryGetProperty("firstSeen", out var first) == true ? first.GetDateTime() : DateTime.UtcNow, lastSeen = DateTime.UtcNow
                     }, new JsonSerializerOptions { WriteIndented = true }), replace: true);
-                    CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" disposition={disposition} state={state} plan={observation.Plan?.PlanId}");
+                    CrescendarrGuard.Emit(_logger, $"CYCLE_DOWNLOAD download=\"{item.DownloadId}\" disposition={disposition} state={state} plan={observation.Plan?.PlanId} reason=\"{observation.Blocked}\"");
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
