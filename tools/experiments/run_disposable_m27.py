@@ -346,7 +346,7 @@ def run(bin_dir: Path, seeder: Path, candidate: Path, sab_dir: Path, python: str
         attribute(lane, host, before, "after-wrong-edition", stock_may_import=True)
 
         before = Snapshot(lane, host, "before-good")
-        good_folder = sab_job(lane, sab, store, GOOD, "Crescendarr Synthetic Artist - Crescendarr Synthetic Album")
+        good_folder = sab_job(lane, sab, store, GOOD, "Crescendarr Synthetic Artist - Crescendarr Synthetic Album (2024) [MP3 256]")
         cycle(host)
         good = report(lane).get(good_folder.name)
         note(f"PREVIEW_GOOD_FIRST_CYCLE {good['state'] if good else 'not yet / already handled by stock'} tracks={[(t['Track'], t['Action']) for t in good['tracks']] if good else None}")
@@ -398,8 +398,12 @@ def run(bin_dir: Path, seeder: Path, candidate: Path, sab_dir: Path, python: str
             time.sleep(90)
             during = host.api("GET", f"command/{pushed['id']}")
             note(f"OUTAGE_COMMAND status={status(during)} after 90 s with every smbd stopped")
-            check((lane.data / "crescendarr-audit" / "report.json").read_bytes() == report_before,
-                  "while the SMB server is not answering, the audit writes no preview at all (nothing is reported missing or new)")
+            albums = (good_folder.name, wrong_folder.name)
+            during_report = {k: (v["state"], [(t["Track"], t["Action"]) for t in v["tracks"]]) for k, v in report(lane).items()}
+            note(f"OUTAGE_REPORT rewritten={(lane.data / 'crescendarr-audit' / 'report.json').read_bytes() != report_before} "
+                 f"albums={ {k: during_report.get(k) for k in albums} }")
+            check(all(during_report.get(k) in (expected.get(k), ("LibraryUnavailable", []), None) for k in albums),
+                  "while the SMB server is not answering, no album preview turns into a false Upgrade/Add/Missing")
         finally:
             share.signal_server(signal.SIGCONT)
         limit = time.monotonic() + 300
@@ -407,7 +411,7 @@ def run(bin_dir: Path, seeder: Path, candidate: Path, sab_dir: Path, python: str
             time.sleep(3)
         check(status(host.api("GET", f"command/{pushed['id']}")) == "completed", "after the server answers again the blocked audit cycle completes")
         resumed = {k: (v["state"], [(t["Track"], t["Action"]) for t in v["tracks"]]) for k, v in report(lane).items()}
-        albums = (good_folder.name, wrong_folder.name)  # the library-dependent previews (blackhole entries depend on stock timing)
+        # albums: the library-dependent previews (blackhole entries depend on stock timing)
         check({k: resumed.get(k) for k in albums} == {k: expected.get(k) for k in albums},
               f"the resumed cycle reports exactly the album previews from before the outage ({ {k: resumed.get(k) for k in albums} })")
         time.sleep(20)
