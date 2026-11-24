@@ -57,7 +57,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             var selected = (settings.ObservedClients ?? Array.Empty<int>()).ToHashSet();
             var clientProblems = new List<string>();
             var items = new List<(DownloadClientItem Item, int ClientId, string ClientName, string Folder)>();
-            var refused = new List<(DownloadClientItem Item, int ClientId, string Folder, string State, string Reason)>();
+            var refused = new List<(DownloadClientItem Item, int ClientId, string? Folder, string State, string Reason)>();
             var enabled = _clients.DownloadHandlingEnabled().Where(c => selected.Contains(c.Definition.Id)).ToList();
             foreach (var id in selected.Where(id => enabled.All(c => c.Definition.Id != id)).OrderBy(i => i))
                 clientProblems.Add($"selected download client {id} is missing or disabled");

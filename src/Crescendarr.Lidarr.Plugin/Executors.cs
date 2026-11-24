@@ -383,6 +383,11 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             return null;
         }
 
+        /// <summary>A value the reconciler guarantees for this action. Throws the same exception <c>Nullable.Value</c> did,
+        /// naming the broken invariant instead of a bare "Nullable object must have a value".</summary>
+        private static T Required<T>(T? value, string what) where T : struct =>
+            value ?? throw new InvalidOperationException("invariant broken: missing " + what);
+
         private string RequiresReviewWithoutJournal(OperationContext context, string why)
         {
             context.Proposal = null;
@@ -395,7 +400,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// operation record), then recompute stock NEW-download decisions on the complete album. Never from stored
         /// command bodies, never NewDownload=false. Called lazily, only for a not-yet-declared native step.
         /// </summary>
-        private bool RefillAndDecide(OperationContext context, string downloadFolder, Dictionary<string, string> candidates)
+        private bool RefillAndDecide(OperationContext context, string downloadFolder, Dictionary<string, string?> candidates)
         {
             Disk.RequireConfined(context.Root, context.Staging, "staging folder");
             foreach (var (key, sha) in candidates)
@@ -403,7 +408,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var staged = Path.Combine(context.Staging, key);
                 if (File.Exists(staged)) continue;
                 var source = Path.Combine(downloadFolder, key);
-                if (!Disk.IsRegularFile(context.Root, source) || Disk.Sha(source) != sha)
+                // A missing digest already failed this comparison; it is now explicit.
+                if (sha == null || !Disk.IsRegularFile(context.Root, source) || Disk.Sha(source) != sha)
                 {
                     CrescendarrGuard.Emit(_logger, $"RECOVERY_REVIEW completed download changed or vanished: {key}");
                     return false;
@@ -515,7 +521,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                         if (_lyrics.GetFilesByArtist(context.Artist.Id).Any(l => l.Id == binding.Lyric.LyricFileId)) _lyrics.Delete(binding.Lyric.LyricFileId);
                         break;
                     case RecoveryAction.RecordOriginalRebase:
-                        manifest = JournalEngine.RecordOriginalRebase(manifest, trackId, next.NewTrackFileId.Value);
+                        manifest = JournalEngine.RecordOriginalRebase(manifest, trackId, Required(next.NewTrackFileId, "rebase track-file ID"));
                         Save(context.OperationRoot, manifest);
                         CrescendarrGuard.Emit(_logger, $"REBASE_ORIGINAL track={trackId} boundOriginal={manifest.BindingFor(trackId).OriginalTrackFileId} observedCurrent={next.NewTrackFileId} (evidence only; binding unchanged)");
                         break;
@@ -563,7 +569,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
 
                     case RecoveryAction.RelinkLyric:
                     {
-                        var target = next.NewTrackFileId ?? progress.NewTrackFileId.Value;
+                        var target = next.NewTrackFileId ?? Required(progress.NewTrackFileId, "relink track-file ID");
                         Disk.RequireConfined(context.Root, binding.Lyric.Path, "bound lyric");
                         Declared(JournalStep.RelinkLyric);
                         // Re-read immediately before the insert; any row that appeared meanwhile goes back to the reconciler.
@@ -577,11 +583,11 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                     case RecoveryAction.RecordStepDone:
                         manifest = isAddition
                             ? JournalEngine.MarkAdditionDone(manifest, trackId, next.NewTrackFileId)
-                            : JournalEngine.MarkDone(manifest, trackId, progress.InFlight.Value, next.NewTrackFileId, next.NewLyricFileId);
+                            : JournalEngine.MarkDone(manifest, trackId, Required(progress.InFlight, "in-flight step"), next.NewTrackFileId, next.NewLyricFileId);
                         Save(context.OperationRoot, manifest);
                         break;
                     case RecoveryAction.AbandonStep:
-                        manifest = isAddition ? JournalEngine.AbandonAddition(manifest, trackId) : JournalEngine.AbandonInFlight(manifest, trackId, progress.InFlight.Value);
+                        manifest = isAddition ? JournalEngine.AbandonAddition(manifest, trackId) : JournalEngine.AbandonInFlight(manifest, trackId, Required(progress.InFlight, "in-flight step"));
                         Save(context.OperationRoot, manifest);
                         break;
                     case RecoveryAction.RestoreOriginalBytes:
@@ -1114,8 +1120,8 @@ namespace NzbDrone.Core.Plugins.Crescendarr
                 var ids = new HashSet<int>();
                 ids.UnionWith(b.Tracks.Select(t => t.OriginalTrackFileId));
                 ids.UnionWith(b.Kept.Select(k => k.TrackFileId));
-                ids.UnionWith(manifest.Progress.Where(p => p.NewTrackFileId != null).Select(p => p.NewTrackFileId.Value));
-                ids.UnionWith(manifest.Additions.Where(a => a.NewTrackFileId != null).Select(a => a.NewTrackFileId.Value));
+                ids.UnionWith(manifest.Progress.Select(p => p.NewTrackFileId).OfType<int>());
+                ids.UnionWith(manifest.Additions.Select(a => a.NewTrackFileId).OfType<int>());
                 ids.UnionWith(releaseTracks.Where(t => bound.Contains(t.Id)).Select(t => t.TrackFileId));
                 ids.UnionWith(albumFiles.Select(f => f.Id));
                 ids.UnionWith(pathRows.Select(f => f.Id));

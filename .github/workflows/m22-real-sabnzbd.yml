@@ -29,10 +29,10 @@ jobs:
       matrix:
         scenario: [sab-real-happy, sab-real-failed-retry, sab-real-restarts, sab-real-paths, sab-real-unverified-missing]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
@@ -88,7 +88,7 @@ jobs:
             "${{ steps.sab.outputs.dir }}" "${{ steps.sab.outputs.python }}" "${{ matrix.scenario }}"
       - name: Upload redacted evidence (no DB copies; they hold the ephemeral SAB API key)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: m22-${{ matrix.scenario }}-evidence
           path: |

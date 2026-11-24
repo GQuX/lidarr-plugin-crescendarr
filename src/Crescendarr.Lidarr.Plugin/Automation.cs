@@ -505,7 +505,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             Disk.Sha(Encoding.UTF8.GetBytes(string.Join("\n", incoming.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + ":" + k.Value))));
 
         /// <summary>The previous record, or (null, null, true) when there is none; (null, null, false) when it cannot be trusted.</summary>
-        private static (RegistryRecord Record, JsonElement? Raw, bool Readable) ReadRegistry(string path)
+        private static (RegistryRecord? Record, JsonElement? Raw, bool Readable) ReadRegistry(string path)
         {
             if (!File.Exists(path)) return (null, null, true);
             try
@@ -530,17 +530,17 @@ namespace NzbDrone.Core.Plugins.Crescendarr
         /// Completion evidence from the operations' OWN durable files: first the operation the record names, otherwise any
         /// operation whose operation.json binds exactly this client, download ID, folder and content.
         /// </summary>
-        private static (OperationEvidence Evidence, string OperationId) Evidence(string root, JsonElement? raw, SourceIdentity current)
+        private static (OperationEvidence Evidence, string? OperationId) Evidence(string root, JsonElement? raw, SourceIdentity current)
         {
             var ops = Path.Combine(root, "crescendarr", "ops");
-            string Named()
+            string? Named()
             {
                 if (raw is not { } r) return null;
                 if (r.TryGetProperty("completion", out var c) && c.ValueKind == JsonValueKind.Object && c.TryGetProperty("operationId", out var ci) && ci.ValueKind == JsonValueKind.String) return ci.GetString();
                 return r.TryGetProperty("operationId", out var o) && o.ValueKind == JsonValueKind.String ? o.GetString() : null;
             }
 
-            (OperationEvidence, string) Of(string id)
+            (OperationEvidence, string?) Of(string? id)
             {
                 if (id == null || !Guid.TryParseExact(id, "D", out _)) return (OperationEvidence.None, null);
                 var opRoot = Disk.RequireConfined(root, Path.Combine(ops, id), "operation");
@@ -570,7 +570,7 @@ namespace NzbDrone.Core.Plugins.Crescendarr
             try
             {
                 var op = JsonDocument.Parse(File.ReadAllText(path)).RootElement;
-                var candidates = op.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString(), StringComparer.Ordinal);
+                var candidates = op.GetProperty("candidates").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty, StringComparer.Ordinal);
                 return op.GetProperty("clientId").GetInt32() == current.ClientId && op.GetProperty("downloadId").GetString() == current.DownloadId &&
                     Path.GetFullPath(op.GetProperty("downloadFolder").GetString()).TrimEnd('/') == current.Folder && ContentDigest(candidates) == current.ContentDigest;
             }

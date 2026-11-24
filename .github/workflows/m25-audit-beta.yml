@@ -30,10 +30,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
@@ -109,7 +109,7 @@ jobs:
           PY
           cp "${RUNNER_TEMP}/audit-scan.txt" "${RUNNER_TEMP}/candidate/"
           ( cd "${RUNNER_TEMP}/candidate" && sha256sum *.zip > SHA256SUMS && cat SHA256SUMS ) | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: crescendarr-audit-beta-candidate
           path: ${{ runner.temp }}/candidate/
@@ -124,13 +124,13 @@ jobs:
       matrix:
         scenario: [audit-readonly, package-lifecycle]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: crescendarr-audit-beta-candidate
           path: ${{ runner.temp }}/candidate
@@ -165,7 +165,7 @@ jobs:
             "${RUNNER_TEMP}/seeder/Lidarr.Plugin.CrescendarrFixtureSeeder.dll" "${{ matrix.scenario }}"
       - name: Upload evidence (logs, DB copies, audit state; synthetic data only)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: m25-${{ matrix.scenario }}-evidence
           path: |

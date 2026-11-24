@@ -25,10 +25,10 @@ jobs:
       matrix:
         scenario: [sab-client, realistic-rename, realistic-repeated, install-cycle]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
       - name: Retrieve SHA-256-pinned upstream Lidarr stable runtime
@@ -69,7 +69,7 @@ jobs:
             "${RUNNER_TEMP}/out-seeder/Lidarr.Plugin.CrescendarrFixtureSeeder.dll" "${{ matrix.scenario }}"
       - name: Upload evidence (logs, DB copies, journals, package)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: m21-${{ matrix.scenario }}-evidence
           path: |
